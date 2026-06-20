@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"unicode/utf8"
 	"log/slog"
 	"net/http"
 	"os"
@@ -147,21 +148,34 @@ func normalizeBody(body []byte) []byte {
 				if content, ok := msg["content"]; ok {
 					switch c := content.(type) {
 					case []any:
-						// list[dict] 格式 → 提取文本拼接
-						var texts []string
+						// list[dict] 格式 → 保留多模态结构，仅规范化 text 部分
+						hasNonText := false
 						for _, p := range c {
 							if part, ok := p.(map[string]any); ok {
-								if part["type"] == "text" {
-									if t, ok := part["text"].(string); ok {
-										texts = append(texts, t)
-									}
+								if part["type"] != "text" {
+									hasNonText = true
+									break
 								}
-							} else if s, ok := p.(string); ok {
-								texts = append(texts, s)
 							}
 						}
-						msg["content"] = strings.Join(texts, "\n")
-						changed = true
+						if !hasNonText {
+							// 纯文本列表 → 拼接为字符串
+							var texts []string
+							for _, p := range c {
+								if part, ok := p.(map[string]any); ok {
+									if part["type"] == "text" {
+										if t, ok := part["text"].(string); ok {
+											texts = append(texts, t)
+										}
+									}
+								} else if s, ok := p.(string); ok {
+									texts = append(texts, s)
+								}
+							}
+							msg["content"] = strings.Join(texts, "\n")
+							changed = true
+						}
+						// 有多模态内容 → 保持原样不动
 					case map[string]any:
 						// dict 格式 → 序列化为 JSON 字符串
 						if b, err := json.Marshal(c); err == nil {
@@ -519,7 +533,7 @@ func handleStreamResponse(ctx context.Context, w http.ResponseWriter, pending *g
 						chunkBuffer = chunkBuffer[len(chunkBuffer)-20:]
 					}
 				}
-				fmt.Fprintf(w, "data: %s\n\n", msg.Body)
+				fmt.Fprintf(w, "data: %s\n\n", sanitizeUTF8(msg.Body))
 				flusher.Flush()
 			case "finish":
 				// 提取 token 用量
@@ -667,4 +681,12 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// sanitizeUTF8 清理非法 UTF-8 字节
+func sanitizeUTF8(b []byte) []byte {
+	if utf8.Valid(b) {
+		return b
+	}
+	return []byte(strings.ToValidUTF8(string(b), "�"))
 }

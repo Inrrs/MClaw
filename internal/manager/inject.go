@@ -328,7 +328,7 @@ def log(msg):
 
 async def safe_send(ws, lock, data):
     try:
-        async with lock: await ws.send(json.dumps(data))
+        async with lock: await ws.send(json.dumps(data, ensure_ascii=False))
     except: pass
 
 async def handle_request(ws, req, client, lock):
@@ -350,7 +350,7 @@ async def handle_request(ws, req, client, lock):
                 msgs = parsed.get("messages", [])
                 if not any(m.get("role") == "system" for m in msgs):
                     parsed["messages"] = [{"role": "system", "content": "You are a personal assistant running inside OpenClaw."}] + msgs
-        body = json.dumps(parsed)
+        body = json.dumps(parsed, ensure_ascii=False)
         log(f"[{req_id}] 发送MIMO body={body[:300]}")
         if "/anthropic/" in path:
             url, auth_hdr = f"{BASE}/anthropic/v1/messages", {"x-api-key": KEY}
@@ -373,7 +373,7 @@ async def sync_models(ws, client):
         if resp.status_code == 200:
             data = resp.json()
             log(f"模型同步 resp_type={type(data).__name__}")
-            await ws.send(json.dumps({"req_id":"__models__","type":"models","body":data}))
+            await ws.send(json.dumps({"req_id":"__models__","type":"models","body":data}, ensure_ascii=False))
             log(f"模型同步: {len(data.get('data',[]))} 个")
     except Exception as e: log(f"模型同步异常: {e}")
 
@@ -393,7 +393,8 @@ async def main():
                     lock = asyncio.Lock()
                     while True:
                         try:
-                            msg = await ws.recv()
+                            raw_msg = await ws.recv(decode=False)
+                            msg = raw_msg.decode("utf-8", errors="replace")
                             data = json.loads(msg)
                             log(f"收到消息 type={data.get('type','?')} path={data.get('path','?')}")
                             asyncio.create_task(handle_request(ws, data, client, lock))
@@ -401,8 +402,6 @@ async def main():
                             log("WS 连接被关闭"); break
                         except json.JSONDecodeError as e:
                             log(f"消息解析失败: {e}")
-                        except UnicodeDecodeError as e:
-                            log(f"编码错误(跳过): {e}")
                         except Exception as e:
                             log(f"接收异常: {type(e).__name__}: {e}")
             except Exception as e:

@@ -145,18 +145,30 @@ func pingLoop(pool *NodePool, node *Node) {
 	}
 }
 
+// validMessageTypes 白名单
+var validMessageTypes = map[string]bool{
+	"start": true, "chunk": true, "finish": true, "error": true, "models": true,
+}
+
 func handleBridgeMessage(pool *NodePool, node *Node, data []byte) {
 	var msg BridgeResponse
 	if err := json.Unmarshal(data, &msg); err != nil {
-		slog.Error("解析消息失败", "error", err)
+		slog.Error("解析消息失败", "error", err, "node", node.ID)
 		return
 	}
 
+	// models 同步消息特殊处理
 	if msg.ReqID == "__models__" {
 		var models []string
 		if err := json.Unmarshal(msg.Body, &models); err == nil {
 			pool.UpdateModels(node.ID, models)
 		}
+		return
+	}
+
+	// 校验 type 字段
+	if !validMessageTypes[msg.Type] {
+		slog.Warn("未知消息类型", "type", msg.Type, "reqID", msg.ReqID, "node", node.ID)
 		return
 	}
 
