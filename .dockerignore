@@ -1,0 +1,12 @@
+.git
+.github
+.gitignore
+.dockerignore
+*.md
+logs/
+users/
+data/*.json
+!data/config.example.json
+.env
+.env.*
+.claude/

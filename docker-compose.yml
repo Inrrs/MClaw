@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  mclaw:
+    image: cinrrs/mclaw:latest
+    container_name: mclaw
+    restart: always
+    network_mode: bridge
+    ports:
+      - "8900:8900"
+    volumes:
+      - ./data:/app/data
+      - ./users:/app/users
+      - ./logs:/app/logs
+    env_file:
+      - .env

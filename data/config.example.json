@@ -1,0 +1,23 @@
+{
+  "server": {
+    "port": "8900",
+    "host": "0.0.0.0"
+  },
+  "gateway": {
+    "external_url": "ws://xxxxx:9100"
+  },
+  "auth": {
+    "api_key": "",
+    "webui_user": "admin",
+    "webui_password": ""
+  },
+  "proxy": {
+    "pool_url": "",
+    "protocol": "http",
+    "interval": 30
+  },
+  "manager": {
+    "switch_before_min": 5,
+    "check_interval": 30
+  }
+}

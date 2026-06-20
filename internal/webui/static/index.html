@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MClaw 管理面板</title>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-base: #080c14;
+  --bg-surface: #0f1520;
+  --bg-card: rgba(15,21,32,0.85);
+  --bg-hover: rgba(55,65,81,0.3);
+  --bg-input: #151c2c;
+  --border: rgba(55,65,81,0.5);
+  --border-focus: #3b82f6;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-glow: rgba(59,130,246,0.2);
+  --cta: #f97316;
+  --cta-hover: #ea580c;
+  --success: #10b981;
+  --success-bg: rgba(16,185,129,0.12);
+  --warn: #f59e0b;
+  --warn-bg: rgba(245,158,11,0.12);
+  --danger: #ef4444;
+  --danger-bg: rgba(239,68,68,0.12);
+  --info: #6366f1;
+  --info-bg: rgba(99,102,241,0.12);
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-lg: 0 10px 25px rgba(0,0,0,0.5);
+  --transition: 200ms ease;
+  --font-body: 'Fira Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'Fira Code', 'SF Mono', Menlo, monospace;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --transition: 0ms; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:16px;-webkit-font-smoothing:antialiased}
+body{font-family:var(--font-body);background:var(--bg-base);color:var(--text-primary);min-height:100vh;line-height:1.5}
+a{color:var(--accent);text-decoration:none}
+button{font-family:inherit;cursor:pointer;border:none;outline:none}
+input,textarea,select{font-family:inherit;outline:none}
+::selection{background:var(--accent);color:#fff}
+
+/* Layout */
+.app{display:flex;flex-direction:column;min-height:100vh}
+.topbar{background:var(--bg-surface);border-bottom:1px solid var(--border);padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;backdrop-filter:blur(12px)}
+.topbar-brand{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:700}
+.topbar-brand svg{color:var(--accent)}
+.topbar-brand span{background:linear-gradient(135deg,var(--accent),#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.topbar-actions{display:flex;align-items:center;gap:8px}
+.container{max-width:1400px;margin:0 auto;padding:20px 24px 40px;width:100%}
+
+/* Tabs */
+.tabs{display:flex;gap:4px;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:4px;margin-bottom:24px;overflow-x:auto}
+.tab{flex:1;min-width:0;padding:10px 16px;text-align:center;cursor:pointer;font-size:13px;font-weight:500;color:var(--text-muted);border-radius:var(--radius);transition:all var(--transition);display:flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}
+.tab:hover{color:var(--text-secondary);background:var(--bg-hover)}
+.tab.active{color:#fff;background:linear-gradient(135deg,var(--accent),#8b5cf6);box-shadow:0 2px 8px var(--accent-glow)}
+.tab svg{width:16px;height:16px;flex-shrink:0}
+.tab-content{display:none;animation:fadeUp .25s ease}
+.tab-content.active{display:block}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* Card */
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px 24px;margin-bottom:16px;backdrop-filter:blur(8px)}
+.card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.card-title{font-size:13px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.6px;display:flex;align-items:center;gap:8px}
+.card-title svg{width:16px;height:16px;color:var(--accent)}
+
+/* Metrics Grid */
+.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+@media(max-width:1024px){.metrics{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:600px){.metrics{grid-template-columns:repeat(2,1fr)}}
+.metric{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;transition:all var(--transition);position:relative;overflow:hidden}
+.metric::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),#8b5cf6);opacity:0;transition:opacity var(--transition)}
+.metric:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:var(--shadow-lg)}
+.metric:hover::after{opacity:1}
+.metric-value{font-size:24px;font-weight:700;line-height:1.2;margin-bottom:4px;font-variant-numeric:tabular-nums;font-family:var(--font-mono);text-shadow:0 0 12px rgba(59,130,246,0.3)}
+.metric-label{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px}
+
+/* Status Badge */
+.badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:0.3px}
+.badge::before{content:'';width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.badge-success{background:var(--success-bg);color:var(--success)}.badge-success::before{background:var(--success)}
+.badge-warn{background:var(--warn-bg);color:var(--warn)}.badge-warn::before{background:var(--warn)}
+.badge-danger{background:var(--danger-bg);color:var(--danger)}.badge-danger::before{background:var(--danger)}
+.badge-info{background:var(--info-bg);color:var(--info)}.badge-info::before{background:var(--info)}
+.badge-muted{background:rgba(100,116,139,0.12);color:var(--text-muted)}.badge-muted::before{background:var(--text-muted)}
+
+/* Table */
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:separate;border-spacing:0}
+th{padding:10px 14px;text-align:left;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);white-space:nowrap;position:sticky;top:0;background:var(--bg-card)}
+td{padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle}
+tr:hover td{background:var(--bg-hover)}
+tr.current td{background:rgba(59,130,246,0.06)}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 16px;border-radius:var(--radius-sm);font-size:13px;font-weight:500;transition:all var(--transition);white-space:nowrap}
+.btn:active{transform:scale(0.97)}
+.btn-primary{background:linear-gradient(135deg,var(--accent),#6366f1);color:#fff;box-shadow:0 1px 4px var(--accent-glow)}
+.btn-primary:hover{background:linear-gradient(135deg,var(--accent-hover),#4f46e5);box-shadow:0 4px 12px var(--accent-glow)}
+.btn-cta{background:linear-gradient(135deg,var(--cta),var(--cta-hover));color:#fff;box-shadow:0 1px 4px rgba(249,115,22,0.25)}
+.btn-cta:hover{box-shadow:0 4px 12px rgba(249,115,22,0.35)}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-danger:hover{background:#dc2626}
+.btn-ghost{background:transparent;color:var(--text-secondary);border:1px solid var(--border)}
+.btn-ghost:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--text-muted)}
+.btn-sm{padding:5px 10px;font-size:11px;border-radius:var(--radius-sm)}
+.btn-icon{padding:6px;border-radius:var(--radius-sm);color:var(--text-muted)}
+.btn-icon:hover{background:var(--bg-hover);color:var(--text-primary)}
+.btn svg{width:14px;height:14px;flex-shrink:0}
+
+/* Forms */
+.form-group{margin-bottom:14px}
+.form-label{display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px}
+.form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+input[type="text"],input[type="password"],textarea,select{
+  width:100%;padding:9px 12px;background:var(--bg-input);border:1px solid var(--border);
+  border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;transition:border-color var(--transition),box-shadow var(--transition)}
+input:focus,textarea:focus,select:focus{border-color:var(--border-focus);box-shadow:0 0 0 3px var(--accent-glow)}
+input::placeholder,textarea::placeholder{color:var(--text-muted)}
+textarea{resize:vertical;min-height:80px}
+
+/* Checkbox */
+.checkbox{display:flex;align-items:center;gap:8px;cursor:pointer}
+.checkbox input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+
+/* Model Tag */
+.model-tag{display:inline-flex;align-items:center;padding:5px 12px;border-radius:20px;font-size:12px;background:var(--info-bg);color:var(--accent);border:1px solid rgba(99,102,241,0.2);margin:3px;transition:all var(--transition)}
+.model-tag:hover{background:rgba(99,102,241,0.2);border-color:var(--accent)}
+
+/* Stats Grid */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.stat-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;text-align:center}
+.stat-value{font-size:28px;font-weight:700;margin-bottom:2px;font-variant-numeric:tabular-nums;font-family:var(--font-mono);text-shadow:0 0 10px rgba(59,130,246,0.2)}
+.stat-label{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.4px}
+
+/* Toolbar */
+.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+.toolbar-right{margin-left:auto;display:flex;gap:8px;align-items:center}
+.selected-count{font-size:12px;color:var(--text-muted)}
+
+/* Toast */
+.toast-container{position:fixed;top:68px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.toast{padding:12px 18px;border-radius:var(--radius);font-size:13px;font-weight:500;color:#fff;box-shadow:var(--shadow-lg);pointer-events:auto;animation:toastIn .3s ease;display:flex;align-items:center;gap:8px;max-width:360px}
+.toast svg{width:16px;height:16px;flex-shrink:0}
+.toast-success{background:#059669}.toast-error{background:#dc2626}.toast-info{background:#4f46e5}
+@keyframes toastIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+@keyframes toastOut{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(40px)}}
+
+/* Empty State */
+.empty{text-align:center;padding:40px 20px;color:var(--text-muted)}
+.empty svg{width:40px;height:40px;margin-bottom:12px;opacity:0.4}
+.empty p{font-size:13px}
+
+/* Mapping Row */
+.mapping-row{display:flex;gap:10px;align-items:flex-end;margin-bottom:16px}
+.mapping-row .form-group{margin-bottom:0;flex:1}
+.mapping-row .btn{height:36px}
+
+/* Log Container */
+.log-container{background:var(--bg-base);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 14px;max-height:240px;overflow-y:auto;font-size:12px;font-family:var(--font-mono);line-height:1.7}
+.log-entry{display:flex;gap:8px}
+.log-time{color:var(--text-muted);flex-shrink:0}
+.log-level{font-weight:600;flex-shrink:0;min-width:42px}
+.log-level-INFO{color:var(--success)}.log-level-WARN{color:var(--warn)}.log-level-ERROR{color:var(--danger)}
+
+/* Spinner */
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Token Stats Grid */
+.token-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:16px}
+@media(max-width:1024px){.token-stats{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:600px){.token-stats{grid-template-columns:repeat(2,1fr)}}
+.token-stat{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;transition:all var(--transition);position:relative;overflow:hidden}
+.token-stat::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,#f59e0b,#f97316);opacity:0;transition:opacity var(--transition)}
+.token-stat:hover{border-color:var(--warn);transform:translateY(-2px);box-shadow:var(--shadow-lg)}
+.token-stat:hover::after{opacity:1}
+.token-stat-value{font-size:20px;font-weight:700;line-height:1.3;margin-bottom:2px;font-variant-numeric:tabular-nums;font-family:var(--font-mono)}
+.token-stat-label{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px}
+.token-stat-cost{color:var(--cta)}
+.section-divider{border:none;border-top:1px dashed var(--border);margin:16px 0 0}
+
+/* Responsive */
+@media(max-width:600px){
+  .topbar{padding:0 16px}
+  .container{padding:12px 16px 32px}
+  .tabs{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .tab{flex:none;min-width:auto;padding:8px 14px;font-size:12px}
+  .card{padding:16px}
+  .form-row{grid-template-columns:1fr}
+  .toolbar{flex-direction:column;align-items:stretch}
+  .toolbar-right{margin-left:0}
+  .mapping-row{flex-direction:column}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- Topbar -->
+<div class="topbar">
+  <div class="topbar-brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    <span>MClaw</span>
+  </div>
+  <div class="topbar-actions">
+    <button class="btn btn-ghost btn-sm" onclick="logout()" aria-label="退出登录">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      退出
+    </button>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- Metrics -->
+<div class="card">
+  <div class="card-header"><div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>系统概览</div></div>
+  <div class="metrics" id="metrics">
+    <div class="metric"><div class="metric-value" style="color:var(--text-muted)">-</div><div class="metric-label">加载中</div></div>
+  </div>
+  <hr class="section-divider">
+  <div style="display:flex;align-items:center;gap:8px;margin:12px 0 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/></svg><span style="font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.6px">Token 用量</span><span style="font-size:10px;color:var(--text-muted)">（MIMO 官方定价估算）</span></div>
+  <div class="token-stats" id="tokenStats">
+    <div class="token-stat"><div class="token-stat-value" style="color:var(--text-muted)">-</div><div class="token-stat-label">加载中</div></div>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs" role="tablist">
+  <div class="tab active" role="tab" tabindex="0" onclick="switchTab('accounts',this)" aria-selected="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+    账号管理
+  </div>
+  <div class="tab" role="tab" tabindex="0" onclick="switchTab('models',this)" aria-selected="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    可用模型
+  </div>
+  <div class="tab" role="tab" tabindex="0" onclick="switchTab('mapping',this)" aria-selected="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+    模型映射
+  </div>
+  <div class="tab" role="tab" tabindex="0" onclick="switchTab('proxy',this)" aria-selected="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+    代理
+  </div>
+  <div class="tab" role="tab" tabindex="0" onclick="switchTab('errors',this)" aria-selected="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    错误日志 <span id="errorBadge" style="display:none;background:var(--danger);color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;margin-left:4px"></span>
+  </div>
+</div>
+
+<!-- Accounts Tab -->
+<div id="tab-accounts" class="tab-content active">
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>账号列表</div>
+    </div>
+    <div class="toolbar">
+      <button class="btn btn-ghost btn-sm" onclick="loadAccounts()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        刷新
+      </button>
+      <button class="btn btn-danger btn-sm" onclick="deleteSelected()" id="btnDeleteSelected" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        删除选中 <span id="selectedCount"></span>
+      </button>
+      <div class="toolbar-right">
+        <button class="btn btn-cta btn-sm" onclick="showImportModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          导入账号
+        </button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th style="width:40px"><input type="checkbox" class="checkbox" id="selectAll" onchange="toggleSelectAll()" aria-label="全选"></th>
+          <th>用户ID</th><th>名称</th><th>状态</th><th>剩余时间</th><th>当前</th><th style="width:160px">操作</th>
+        </tr></thead>
+        <tbody id="accounts">
+          <tr><td colspan="7" class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><p>加载中...</p></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Models Tab -->
+<div id="tab-models" class="tab-content">
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>可用模型</div>
+    </div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px">从 bridge 同步的模型列表（注入成功后自动更新）</p>
+    <div id="models" style="display:flex;flex-wrap:wrap;gap:6px">
+      <span style="color:var(--text-muted);font-size:13px">加载中...</span>
+    </div>
+  </div>
+</div>
+
+<!-- Mapping Tab -->
+<div id="tab-mapping" class="tab-content">
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/></svg>模型映射</div>
+    </div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px">客户端请求的模型名自动映射到 MIMO 模型</p>
+    <div class="mapping-row">
+      <div class="form-group"><label class="form-label" for="mapFrom">原始模型</label><input type="text" id="mapFrom" placeholder="如 gpt-4o"></div>
+      <div class="form-group" style="flex:0 0 24px;display:flex;align-items:flex-end;padding-bottom:10px"><span style="color:var(--text-muted);font-size:16px">→</span></div>
+      <div class="form-group"><label class="form-label" for="mapTo">映射到</label><input type="text" id="mapTo" placeholder="如 mimo-v2.5-pro"></div>
+      <div style="display:flex;align-items:flex-end"><button class="btn btn-primary btn-sm" onclick="addMapping()">添加</button></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>原始模型</th><th>映射到</th><th style="width:70px">操作</th></tr></thead>
+        <tbody id="mappingTable">
+          <tr><td colspan="3" class="empty"><p>加载中...</p></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Proxy Tab -->
+<div id="tab-proxy" class="tab-content">
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>代理统计</div>
+    </div>
+    <div id="proxyStats" class="stats-grid">
+      <div class="stat-card"><div class="stat-value" style="color:var(--text-muted)">-</div><div class="stat-label">加载中</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">代理池配置</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:flex-end">
+      <div style="flex:1">
+        <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">代理池 URL</label>
+        <input id="proxyPoolUrl" type="text" placeholder="http://api.xiequ.cn/..." style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px">
+      </div>
+      <button class="btn btn-primary" onclick="updateProxy()" style="white-space:nowrap">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Errors Tab -->
+<div id="tab-errors" class="tab-content">
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>请求错误日志</div>
+      <button class="btn btn-ghost btn-sm" onclick="loadErrorLogs()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        刷新
+      </button>
+    </div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px">API 请求失败记录（最近 100 条）</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>时间</th><th>状态码</th><th>节点</th><th>错误信息</th></tr></thead>
+        <tbody id="errorLogs">
+          <tr><td colspan="4" class="empty"><p>加载中...</p></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+</div><!-- container -->
+</div><!-- app -->
+
+<!-- Toast Container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Import Modal -->
+<div id="importModal" style="display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center">
+  <div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;width:90%;max-width:500px;box-shadow:var(--shadow-lg)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <h3 style="font-size:15px;font-weight:600">导入账号</h3>
+      <button class="btn-icon" onclick="hideImportModal()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="form-group"><label class="form-label" for="impUserId">userId</label><input type="text" id="impUserId" placeholder="userId"></div>
+    <div class="form-group"><label class="form-label" for="impToken">serviceToken</label><input type="text" id="impToken" placeholder="serviceToken"></div>
+    <div class="form-group"><label class="form-label" for="impPH">xiaomichatbot_ph</label><input type="text" id="impPH" placeholder="xiaomichatbot_ph"></div>
+    <div class="form-row" style="margin-bottom:16px">
+      <div class="form-group"><label class="form-label" for="impName">名称（可选）</label><input type="text" id="impName" placeholder="名称"></div>
+      <div class="form-group"><label class="form-label" for="impGroup">分组（可选）</label><input type="text" id="impGroup" placeholder="分组"></div>
+    </div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+    <div class="form-group"><label class="form-label" for="impCurl">从 curl 命令导入</label><textarea id="impCurl" rows="4" placeholder="粘贴 curl 命令..."></textarea></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button class="btn btn-ghost" onclick="hideImportModal()">取消</button>
+      <button class="btn btn-cta" onclick="importAccount()" id="btnImport">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        导入
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
+let selected=new Set();
+
+// XSS 安全转义
+function esc(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+
+// Toast
+function toast(msg,type='info'){
+  const c=$('#toastContainer'),t=document.createElement('div');
+  t.className='toast toast-'+type;
+  const icons={success:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>',error:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',info:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>'};
+  t.innerHTML=(icons[type]||icons.info)+'<span>'+msg+'</span>';
+  c.appendChild(t);
+  setTimeout(()=>{t.style.animation='toastOut .3s ease forwards';setTimeout(()=>t.remove(),300)},3500);
+}
+
+// API helper（30 秒超时，GET 请求自动重试 1 次）
+async function api(u,o,retry){
+  try{
+    const ctrl=new AbortController();
+    const timer=setTimeout(()=>ctrl.abort(),30000);
+    const r=await fetch(u,{...(o||{}),signal:ctrl.signal});
+    clearTimeout(timer);
+    if(r.status===401){location.reload();return{success:false}}
+    if(!r.ok)return{success:false,error:'HTTP '+r.status};
+    return await r.json()
+  }catch(e){
+    if(e.name==='AbortError'){
+      if(!retry&&!o){return api(u,o,true)}
+      return{success:false,error:'timeout'}
+    }
+    return{success:false,error:e.message}
+  }
+}
+
+// Tab switch
+function switchTab(name,el){
+  $$('.tab').forEach(t=>{t.classList.remove('active');t.setAttribute('aria-selected','false')});
+  $$('.tab-content').forEach(t=>t.classList.remove('active'));
+  if(el){el.classList.add('active');el.setAttribute('aria-selected','true')}
+  const target=$('#tab-'+name);if(target)target.classList.add('active');
+}
+
+// Format helpers
+function fmtSec(s){if(s<=0)return'<span style="color:var(--danger);font-weight:600">已过期</span>';const h=Math.floor(s/3600),m=Math.floor(s%3600/60);if(h>0)return'<span style="color:var(--warn)">'+h+'h '+m+'m</span>';return'<span>'+m+'m</span>'}
+function fmtUp(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d>0?d+'天'+h+'时':h>0?h+'时'+m+'分':m+'分'}
+function fmtNum(n){if(n==null)return'0';if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n)}
+function fmtCost(c){if(c==null||c===0)return'¥0.00';if(c<0.01)return'¥'+c.toFixed(4);if(c<1)return'¥'+c.toFixed(3);return'¥'+c.toFixed(2)}
+function sBadge(s){const m={AVAILABLE:'badge-success',CREATING:'badge-warn',ERROR:'badge-danger',CREATE_FAILED:'badge-danger',REBUILDING:'badge-info'};return'<span class="badge '+(m[s]||'badge-muted')+'">'+s+'</span>'}
+
+// Metrics
+async function loadMetrics(){
+  try{
+    const d=await api('/api/metrics');
+    if(d.error){$('#metrics').innerHTML='<div class="metric"><div class="metric-value" style="color:var(--danger)">!</div><div class="metric-label">连接失败</div></div>';return}
+    const items=[
+      {v:fmtUp(d.uptime_seconds),l:'运行时间',c:''},
+      {v:d.total_requests,l:'总请求',c:''},
+      {v:d.success_rate.toFixed(1)+'%',l:'成功率',c:d.success_rate>90?'color:var(--success)':d.success_rate>50?'color:var(--warn)':'color:var(--danger)'},
+      {v:d.online_accounts+'/'+d.total_accounts,l:'在线账号',c:d.online_accounts>0?'color:var(--success)':'color:var(--danger)'},
+      {v:d.active_nodes+'/'+d.total_nodes,l:'活跃节点',c:d.active_nodes>0?'color:var(--success)':'color:var(--danger)'}
+    ];
+    $('#metrics').innerHTML=items.map(m=>'<div class="metric"><div class="metric-value" style="'+m.c+'">'+m.v+'</div><div class="metric-label">'+m.l+'</div></div>').join('');
+    // Token 用量
+    const tokenItems=[
+      {v:fmtNum(d.input_tokens),l:'输入 Tokens',c:'color:var(--accent)'},
+      {v:fmtNum(d.output_tokens),l:'输出 Tokens',c:'color:#8b5cf6'},
+      {v:fmtNum(d.cache_tokens),l:'缓存 Tokens',c:'color:var(--success)'},
+      {v:fmtNum(d.total_tokens),l:'总计 Tokens',c:'color:var(--text-primary)'},
+      {v:fmtCost(d.estimated_cost),l:'预估费用',c:'',cls:'token-stat-cost'}
+    ];
+    $('#tokenStats').innerHTML=tokenItems.map(m=>'<div class="token-stat"><div class="token-stat-value'+(m.cls?' '+m.cls:'')+'" style="'+m.c+'">'+m.v+'</div><div class="token-stat-label">'+m.l+'</div></div>').join('');
+  }catch(e){$('#metrics').innerHTML='<div class="metric"><div class="metric-value" style="color:var(--danger)">!</div><div class="metric-label">渲染错误</div></div>'}
+}
+
+// Accounts
+async function loadAccounts(){
+  try{
+    const d=await api('/api/accounts'),tb=$('#accounts');
+    if(!tb)return;
+    if(d.error){tb.innerHTML='<tr><td colspan="7" class="empty" style="color:var(--danger)"><p>加载失败: '+esc(d.error)+'，<a href="javascript:loadAccounts()">重试</a></p></td></tr>';return}
+    if(!d||!Array.isArray(d)||d.length===0){
+      tb.innerHTML='<tr><td colspan="7" class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="40" height="40"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><p>暂无账号，点击「导入账号」添加</p></td></tr>';
+      return;
+    }
+    tb.innerHTML=d.map(a=>{
+      const uid=a.user_id;
+      return'<tr class="'+(a.is_current?'current':'')+'">'+
+        '<td><input type="checkbox" class="checkbox" value="'+esc(uid)+'" onchange="toggleSelect(this)" aria-label="选择 '+esc(uid)+'"></td>'+
+        '<td><strong>'+esc(uid)+'</strong></td>'+
+        '<td>'+(a.name?esc(a.name):'<span style="color:var(--text-muted)">-</span>')+'</td>'+
+        '<td>'+sBadge(a.status)+'</td>'+
+        '<td>'+fmtSec(a.remain_sec)+'</td>'+
+        '<td>'+(a.is_current?'<span style="color:var(--success);font-weight:600">当前</span>':'-')+'</td>'+
+        '<td><div style="display:flex;gap:4px">'+
+          '<button class="btn btn-ghost btn-sm" onclick="testAccount(\''+esc(uid)+'\')" title="测试调用模型"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></button>'+
+          '<button class="btn btn-ghost btn-sm" onclick="forceInject(\''+esc(uid)+'\')" title="强制注入" style="color:var(--warn)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></button>'+
+          '<button class="btn btn-ghost btn-sm" onclick="toggleLogs(\''+esc(uid)+'\')" title="查看日志"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></button>'+
+          '<button class="btn btn-ghost btn-sm" onclick="del(\''+esc(uid)+'\')" title="删除" style="color:var(--danger)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>'+
+        '</div></td></tr>'+
+        '<tr id="logs-'+esc(uid)+'" style="display:none"><td colspan="7"><div id="logs-content-'+esc(uid)+'" class="log-container"></div></td></tr>';
+    }).join('');
+  }catch(e){console.error('loadAccounts:',e)}
+}
+
+function toggleSelect(cb){
+  cb.checked?selected.add(cb.value):selected.delete(cb.value);
+  $('#selectedCount').textContent=selected.size>0?selected.size:'';
+  $('#btnDeleteSelected').style.display=selected.size>0?'':'none';
+}
+function toggleSelectAll(){
+  const all=$('#selectAll').checked;
+  $$('#accounts input[type=checkbox]').forEach(cb=>{cb.checked=all;all?selected.add(cb.value):selected.delete(cb.value)});
+  $('#selectedCount').textContent=selected.size>0?selected.size:'';
+  $('#btnDeleteSelected').style.display=selected.size>0?'':'none';
+}
+
+// Import
+function showImportModal(){const m=$('#importModal');m.style.display='flex'}
+function hideImportModal(){$('#importModal').style.display='none'}
+
+async function importAccount(){
+  const btn=$('#btnImport');btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 导入中...';
+  try{
+    const curl=$('#impCurl').value.trim();
+    let body;
+    if(curl){
+      body=JSON.stringify({raw_text:curl});
+    }else{
+      body=JSON.stringify([{userId:$('#impUserId').value,serviceToken:$('#impToken').value,xiaomichatbot_ph:$('#impPH').value,name:$('#impName').value,group:$('#impGroup').value}]);
+    }
+    const r=await api('/api/accounts/import',{method:'POST',headers:{'Content-Type':'application/json'},body});
+    if(r.success&&r.imported>0){
+      toast('成功导入 '+r.imported+' 个账号','success');
+      hideImportModal();
+      ['impUserId','impToken','impPH','impName','impGroup','impCurl'].forEach(id=>{const el=$('#'+id);if(el)el.value=''});
+      loadAccounts();loadMetrics();
+    }else{
+      toast(r.error||'导入失败','error');
+    }
+  }catch(e){toast('导入失败: '+e.message,'error')}
+  finally{btn.disabled=false;btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> 导入'}
+}
+
+// Delete
+async function del(uid){
+  if(!confirm('确定删除账号 '+uid+'?'))return;
+  await api('/api/accounts/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:uid})});
+  toast('已删除 '+uid,'success');loadAccounts();loadMetrics();
+}
+async function deleteSelected(){
+  if(selected.size===0)return;if(!confirm('确定删除 '+selected.size+' 个账号?'))return;
+  for(const uid of selected){await api('/api/accounts/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:uid})})}
+  toast('已删除 '+selected.size+' 个账号','success');selected.clear();loadAccounts();loadMetrics();
+}
+
+// Models
+async function loadModels(){
+  try{const d=await api('/api/models'),el=$('#models');
+  if(!d.models||d.models.length===0){el.innerHTML='<div class="empty"><p>暂无模型（等待 bridge 同步）</p></div>';return}
+  el.innerHTML=d.models.map(m=>'<span class="model-tag">'+esc(m)+'</span>').join('')}
+  catch(e){$('#models').innerHTML='<span style="color:var(--danger)">加载失败</span>'}
+}
+
+// Mapping
+async function loadMapping(){
+  try{const d=await api('/api/model_mapping'),tb=$('#mappingTable');
+  const entries=Object.entries(d);
+  if(entries.length===0){tb.innerHTML='<tr><td colspan="3" class="empty"><p>暂无映射</p></td></tr>';return}
+  tb.innerHTML=entries.map(([k,v])=>'<tr><td><strong>'+esc(k)+'</strong></td><td>'+esc(v)+'</td><td><button class="btn btn-ghost btn-sm" onclick="delMapping(\''+esc(k)+'\')" style="color:var(--danger)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></td></tr>').join('')}
+  catch(e){$('#mappingTable').innerHTML='<tr><td colspan="3" class="empty"><p>加载失败</p></td></tr>'}
+}
+
+async function addMapping(){
+  const from=$('#mapFrom').value.trim(),to=$('#mapTo').value.trim();
+  if(!from||!to){toast('请填写完整','error');return}
+  const d=await api('/api/model_mapping')||{};d[from]=to;
+  const r=await api('/api/model_mapping',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+  if(r.ok!==false){$('#mapFrom').value='';$('#mapTo').value='';toast('映射已添加','success');loadMapping()}
+}
+
+async function delMapping(key){
+  if(!confirm('删除映射 '+key+' ?'))return;
+  const d=await api('/api/model_mapping')||{};delete d[key];
+  await api('/api/model_mapping',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+  toast('映射已删除','success');loadMapping();
+}
+
+// Proxy
+async function loadProxyStats(){
+  try{const d=await api('/api/proxy_stats'),el=$('#proxyStats');
+  if(!d.enabled){el.innerHTML='<div class="empty"><p>未配置代理</p></div>';return}
+  el.innerHTML=[
+    {v:d.proxy_count||0,l:'代理数量',c:''},
+    {v:d.total_used,l:'总使用次数',c:''},
+    {v:d.today_used,l:'今日已用',c:''},
+    {v:d.last_ip||'-',l:'最近使用 IP',c:'font-size:14px;word-break:break-all'},
+    {v:d.last_used?new Date(d.last_used).toLocaleTimeString():'-',l:'最近使用时间',c:''}
+  ].map(m=>'<div class="stat-card"><div class="stat-value" style="'+m.c+'">'+m.v+'</div><div class="stat-label">'+m.l+'</div></div>').join('')}
+  catch(e){$('#proxyStats').innerHTML='<span style="color:var(--danger)">加载失败</span>'}
+}
+async function updateProxy(){
+  const url=$('#proxyPoolUrl').value.trim();
+  if(!url){toast('请输入代理池 URL','warning');return}
+  try{
+    const r=await api('/api/proxy',{method:'POST',body:JSON.stringify({pool_url:url})});
+    if(r.ok){toast('代理池 URL 已保存','success');loadProxyStats()}
+    else{toast('保存失败: '+(r.error||'未知错误'),'danger')}
+  }catch(e){toast('保存失败: '+e.message,'danger')}
+}
+
+// Test account
+async function testAccount(uid){
+  const el=$('#logs-content-'+uid),row=$('#logs-'+uid);
+  if(row)row.style.display='';
+  if(el)el.innerHTML='<div style="color:var(--text-muted)"><span class="spinner" style="border-color:var(--text-muted);border-top-color:var(--accent)"></span> 模型调用测试中（最多30秒）...</div>';
+  try{
+    const r=await api('/api/test_account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:uid})});
+    if(!el)return;
+    if(r.success){
+      el.innerHTML='<div style="color:var(--success)">✓ 模型调用成功</div><div>HTTP '+r.status+' | 剩余: '+(r.remain_sec?Math.floor(r.remain_sec/60)+'分钟':'-')+'</div>';
+      toast('模型调用测试成功','success');
+    } else {
+      el.innerHTML='<div style="color:var(--danger)">✗ 调用失败: '+esc(r.error)+'</div><div style="color:var(--text-muted)">步骤: '+esc(r.step)+(r.status?' | HTTP '+r.status:'')+'</div><div style="margin-top:8px"><button class="btn btn-cta btn-sm" onclick="rebuildAccount(\''+esc(uid)+'\')">  重新注入</button> <button class="btn btn-ghost btn-sm" onclick="forceInject(\''+esc(uid)+'\')">⚡ 强制注入</button></div>';
+      toast('模型调用失败: '+r.error,'error');
+    }
+  }catch(e){if(el)el.innerHTML='<span style="color:var(--danger)">✗ '+e.message+'</span>'}
+}
+
+// Rebuild (re-inject)
+async function rebuildAccount(uid){
+  if(!confirm('确定重新注入账号 '+uid+'?'))return;
+  try{
+    const r=await api('/api/accounts/rebuild',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:uid})});
+    if(r.success){toast('重新注入信号已发送，请稍后查看日志','success');setTimeout(loadAccounts,3000)}
+    else{toast(r.error||'触发失败','error')}
+  }catch(e){toast('触发失败: '+e.message,'error')}
+}
+
+// Force inject (skip all checks)
+async function forceInject(uid){
+  if(!confirm('确定强制注入账号 '+uid+'? 将跳过所有检查直接注入。'))return;
+  try{
+    toast('正在强制注入...','info');
+    const r=await api('/api/accounts/force_inject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:uid})});
+    if(r.success){toast('强制注入成功！剩余: '+Math.floor(r.remain_sec/60)+'分钟','success');setTimeout(loadAccounts,1000)}
+    else{toast('注入失败: '+(r.error||'未知错误'),'error')}
+  }catch(e){toast('注入失败: '+e.message,'error')}
+}
+
+// Toggle logs
+async function toggleLogs(uid){
+  const row=$('#logs-'+uid);if(!row)return;
+  if(row.style.display==='none'){
+    row.style.display='';
+    const el=$('#logs-content-'+uid);
+    try{const d=await api('/api/account_logs?userId='+uid);
+    if(!d||d.length===0){el.innerHTML='<span style="color:var(--text-muted)">暂无日志</span>';return}
+    el.innerHTML=d.map(l=>'<div class="log-entry"><span class="log-time">'+esc(l.time.substring(11,19))+'</span><span class="log-level log-level-'+esc(l.level)+'">'+esc(l.level)+'</span><span>'+esc(l.message)+'</span></div>').join('')}
+    catch(e){el.innerHTML='<span style="color:var(--danger)">加载失败</span>'}
+  }else{row.style.display='none'}
+}
+
+// Logout
+async function logout(){await api('/api/auth/logout',{method:'POST'});location.reload()}
+
+// Error Logs
+async function loadErrorLogs(){
+  try{
+    const d=await api('/api/error_logs'),tb=$('#errorLogs');
+    if(!tb)return;
+    if(!d||!Array.isArray(d)||d.length===0){
+      tb.innerHTML='<tr><td colspan="4" class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="40" height="40"><polyline points="20 6 9 17 4 12"/></svg><p>暂无错误日志</p></td></tr>';
+      $('#errorBadge').style.display='none';
+      return;
+    }
+    $('#errorBadge').style.display='';
+    $('#errorBadge').textContent=d.length;
+    tb.innerHTML=d.map(e=>{
+      const t=e.time?new Date(e.time):null;
+      const ts=t?t.toLocaleTimeString('zh-CN',{hour12:false}):'-';
+      const statusColor=e.status>=500?'var(--danger)':e.status>=400?'var(--warn)':'var(--text-muted)';
+      return '<tr>'+
+        '<td style="white-space:nowrap;color:var(--text-muted)">'+esc(ts)+'</td>'+
+        '<td><span style="color:'+statusColor+';font-weight:600;font-family:var(--font-mono)">'+e.status+'</span></td>'+
+        '<td>'+(e.node_id?esc(e.node_id):'<span style="color:var(--text-muted)">-</span>')+'</td>'+
+        '<td style="max-width:400px;word-break:break-all;font-size:12px;color:var(--danger)">'+esc(e.message)+'</td>'+
+        '</tr>';
+    }).join('');
+  }catch(e){console.error('loadErrorLogs:',e)}
+}
+
+// Init (错峰加载，避免并发请求拥堵)
+loadMetrics();
+setTimeout(loadAccounts,500);
+setTimeout(loadModels,1000);
+setTimeout(loadMapping,1500);
+setTimeout(loadProxyStats,2000);
+setTimeout(loadErrorLogs,2500);
+// 防止并发加载
+let _loadingMetrics=false,_loadingAccounts=false;
+const _loadMetrics=loadMetrics;loadMetrics=async function(){if(_loadingMetrics)return;_loadingMetrics=true;try{await _loadMetrics()}finally{_loadingMetrics=false}};
+const _loadAccounts=loadAccounts;loadAccounts=async function(){if(_loadingAccounts)return;_loadingAccounts=true;try{await _loadAccounts()}finally{_loadingAccounts=false}};
+setInterval(loadMetrics,10000);setInterval(loadAccounts,30000);setInterval(loadModels,30000);setInterval(loadProxyStats,30000);setInterval(loadErrorLogs,15000);
+
+// Close modal on backdrop click
+$('#importModal').addEventListener('click',function(e){if(e.target===this)hideImportModal()});
+</script>
+</body>
+</html>
