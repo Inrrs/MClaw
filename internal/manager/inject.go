@@ -350,6 +350,8 @@ async def handle_request(ws, req, client, lock):
                 msgs = parsed.get("messages", [])
                 if not any(m.get("role") == "system" for m in msgs):
                     parsed["messages"] = [{"role": "system", "content": "You are a personal assistant running inside OpenClaw."}] + msgs
+        if not parsed.get("max_tokens"):
+            parsed["max_tokens"] = 4096
         body = json.dumps(parsed, ensure_ascii=False)
         log(f"[{req_id}] 发送MIMO body={body[:300]}")
         if "/anthropic/" in path:

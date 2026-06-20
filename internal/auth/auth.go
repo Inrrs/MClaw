@@ -22,6 +22,7 @@ type Auth struct {
 	mu          sync.RWMutex
 	rateLimiter map[string]*rateEntry
 	rateMu      sync.Mutex
+	stopCh      chan struct{}
 }
 
 type rateEntry struct {
@@ -47,6 +48,7 @@ func New(apiKey, webUIUser, webUIPass, secret string) *Auth {
 		rateLimiter: make(map[string]*rateEntry),
 	}
 
+	a.stopCh = make(chan struct{})
 	go a.cleanupSessions()
 	return a
 }
@@ -190,18 +192,30 @@ func (a *Auth) validateSession(sessionID string) bool {
 	return ok && time.Now().Before(expiry)
 }
 
+// Stop 停止 auth 清理 goroutine
+func (a *Auth) Stop() {
+	if a.stopCh != nil {
+		close(a.stopCh)
+	}
+}
+
 func (a *Auth) cleanupSessions() {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		a.mu.Lock()
-		for sessionID, expiry := range a.sessions {
-			if time.Now().After(expiry) {
-				delete(a.sessions, sessionID)
+	for {
+		select {
+		case <-ticker.C:
+			a.mu.Lock()
+			for sessionID, expiry := range a.sessions {
+				if time.Now().After(expiry) {
+					delete(a.sessions, sessionID)
+				}
 			}
+			a.mu.Unlock()
+		case <-a.stopCh:
+			return
 		}
-		a.mu.Unlock()
 	}
 }
 

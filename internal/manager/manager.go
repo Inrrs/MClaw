@@ -3,6 +3,7 @@ package manager
 import (
 	"encoding/json"
 	"fmt"
+	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
@@ -886,7 +887,7 @@ func (m *AccountManager) doRequest(req *http.Request) (*http.Response, error) {
 			if req.Body != nil {
 				bodyCopy, _ = io.ReadAll(req.Body)
 				req.Body.Close()
-				req.Body = io.NopCloser(strings.NewReader(string(bodyCopy)))
+				req.Body = io.NopCloser(bytes.NewReader(bodyCopy))
 			}
 
 			resp, err := client.Do(req)
@@ -901,7 +902,7 @@ func (m *AccountManager) doRequest(req *http.Request) (*http.Response, error) {
 
 			// restore body for next attempt
 			if bodyCopy != nil {
-				req.Body = io.NopCloser(strings.NewReader(string(bodyCopy)))
+				req.Body = io.NopCloser(bytes.NewReader(bodyCopy))
 			}
 		}
 		// 代理全部失败，回退直连
@@ -1087,8 +1088,11 @@ func (m *AccountManager) TestAccount(userID string) map[string]any {
 				}
 			case "error":
 				if msg.Body != nil {
-					json.Unmarshal(msg.Body, &errBody)
-					if errBody == "" {
+					// 尝试解码 JSON 字符串
+					var s string
+					if json.Unmarshal(msg.Body, &s) == nil && s != "" {
+						errBody = s
+					} else {
 						errBody = string(msg.Body)
 					}
 				}
@@ -1130,27 +1134,30 @@ func (m *AccountManager) startCountdown(userID string, duration time.Duration) {
 	slog.Info("启动倒计时", "userId", userID, "duration", duration)
 
 	go func() {
-		ticker := time.NewTicker(1 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
-				m.mu.Lock()
-				s := m.statuses[userID]
-				if s == nil {
-					m.mu.Unlock()
-					return
-				}
-				s.RemainSec = int(time.Until(s.ExpireTime).Seconds())
-				if s.RemainSec < 0 {
-					s.RemainSec = 0
-					s.Status = "EXPIRED"
+				remain := int(time.Until(status.ExpireTime).Seconds())
+				if remain < 0 {
+					m.mu.Lock()
+					s := m.statuses[userID]
+					if s != nil {
+						s.RemainSec = 0
+						s.Status = "EXPIRED"
+					}
 					m.mu.Unlock()
 					LogAccountInfo(userID, "容器已过期")
 					return
 				}
-				m.mu.Unlock()
+				// 原子更新 RemainSec，避免每秒获取写锁
+				m.mu.RLock()
+				if s, ok := m.statuses[userID]; ok {
+					s.RemainSec = remain
+				}
+				m.mu.RUnlock()
 			case <-stopCh:
 				return
 			}
