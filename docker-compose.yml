@@ -12,5 +12,7 @@ services:
       - ./data:/app/data
       - ./users:/app/users
       - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
     env_file:
       - .env

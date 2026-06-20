@@ -23,6 +23,13 @@ import (
 
 const defaultBaseURL = "https://aistudio.xiaomimimo.com"
 
+// tomorrowMidnight 返回明天零点的时间（冻结到第二天）
+func tomorrowMidnight() time.Time {
+	now := time.Now()
+	y, m, d := now.Date()
+	return time.Date(y, m, d+1, 0, 0, 0, 0, now.Location())
+}
+
 // Account 账号信息
 type Account struct {
 	UserID          string `json:"userId"`
@@ -42,7 +49,7 @@ type AccountStatus struct {
 	RemainSec    int
 	IsCurrent    bool
 	LastFailTime time.Time // 上次失败时间（用于 4 小时冷却）
-	FrozenUntil  time.Time // 风控冻结截止时间（24 小时）
+	FrozenUntil  time.Time // 冻结截止时间（到第二天零点）
 	TimerStopCh  chan struct{}
 }
 
@@ -421,9 +428,9 @@ func (m *AccountManager) doCreateAndConnect() {
 		if err != nil {
 			// 401/403 表示凭证失效，冻结 24 小时
 			if strings.Contains(err.Error(), "code=401") || strings.Contains(err.Error(), "code=403") {
-				LogAccountWarn(account.UserID, "凭证失效(401/403)，冻结 24 小时")
+				LogAccountWarn(account.UserID, "凭证失效(401/403)，冻结到明天")
 				m.mu.Lock()
-				m.statuses[account.UserID].FrozenUntil = time.Now().Add(24 * time.Hour)
+				m.statuses[account.UserID].FrozenUntil = tomorrowMidnight()
 				m.mu.Unlock()
 				go SaveManagerState(m.getCurrentUserID(), m.snapshotStatuses())
 			} else {
@@ -469,9 +476,9 @@ func (m *AccountManager) doCreateAndConnect() {
 			}
 			// 1011 服务器内部错误 → 冻结 24h，切换下一个账号
 			if wsCloseCode.Load() == 1011 {
-				LogAccountWarn(account.UserID, "容器内部错误(1011)，冻结 24 小时")
+				LogAccountWarn(account.UserID, "容器内部错误(1011)，冻结到明天")
 				m.mu.Lock()
-				m.statuses[account.UserID].FrozenUntil = time.Now().Add(24 * time.Hour)
+				m.statuses[account.UserID].FrozenUntil = tomorrowMidnight()
 				m.mu.Unlock()
 				go SaveManagerState(m.getCurrentUserID(), m.snapshotStatuses())
 			} else {
@@ -589,7 +596,7 @@ func (m *AccountManager) tryCreateForAccount(account *Account) {
 		if wsCloseCode.Load() == 1011 {
 			LogAccountWarn(account.UserID, "新容器内部错误(1011)，冻结 24 小时")
 			m.mu.Lock()
-			m.statuses[account.UserID].FrozenUntil = time.Now().Add(24 * time.Hour)
+			m.statuses[account.UserID].FrozenUntil = tomorrowMidnight()
 			m.mu.Unlock()
 			go SaveManagerState(m.getCurrentUserID(), m.snapshotStatuses())
 		} else {
@@ -691,10 +698,10 @@ func (m *AccountManager) createContainer(account *Account) bool {
 		return false
 	case 200:
 		slog.Warn("账号被风控，冻结 24 小时", "userId", account.UserID)
-		LogAccountWarn(account.UserID, "账号被风控，冻结 24 小时")
+		LogAccountWarn(account.UserID, "账号被风控，冻结到明天")
 		m.mu.Lock()
 		if status, ok := m.statuses[account.UserID]; ok {
-			status.FrozenUntil = time.Now().Add(24 * time.Hour)
+			status.FrozenUntil = tomorrowMidnight()
 		}
 		m.mu.Unlock()
 		return false
