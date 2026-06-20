@@ -528,12 +528,13 @@ func handleStreamResponse(ctx context.Context, w http.ResponseWriter, pending *g
 			case "chunk":
 				// 累积 chunk 用于提取 usage（最多保留 20 个）
 				if msg.Body != nil {
-					chunkBuffer = append(chunkBuffer, msg.Body)
+					body := unwrapJSON(msg.Body)
+					chunkBuffer = append(chunkBuffer, body)
 					if len(chunkBuffer) > 20 {
 						chunkBuffer = chunkBuffer[len(chunkBuffer)-20:]
 					}
+					fmt.Fprintf(w, "data: %s\n\n", sanitizeUTF8(body))
 				}
-				fmt.Fprintf(w, "data: %s\n\n", sanitizeUTF8(msg.Body))
 				flusher.Flush()
 			case "finish":
 				// 提取 token 用量
@@ -604,7 +605,7 @@ func handleNormalResponse(ctx context.Context, w http.ResponseWriter, pending *g
 				}
 			case "chunk":
 				if msg.Body != nil {
-					responseBody = msg.Body
+					responseBody = unwrapJSON(msg.Body)
 				}
 			case "finish":
 				// 提取 token 用量
@@ -689,4 +690,16 @@ func sanitizeUTF8(b []byte) []byte {
 		return b
 	}
 	return []byte(strings.ToValidUTF8(string(b), "�"))
+}
+
+// unwrapJSON 如果 body 是 JSON 字符串（带引号），解包为内部 JSON
+func unwrapJSON(b []byte) []byte {
+	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
+		return b
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return b
+	}
+	return []byte(s)
 }
