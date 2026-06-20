@@ -350,8 +350,8 @@ async def handle_request(ws, req, client, lock):
                 msgs = parsed.get("messages", [])
                 if not any(m.get("role") == "system" for m in msgs):
                     parsed["messages"] = [{"role": "system", "content": "You are a personal assistant running inside OpenClaw."}] + msgs
-        if not parsed.get("max_tokens"):
-            parsed["max_tokens"] = 200000
+        if not parsed.get("max_tokens") and parsed.get("model") in ("mimo-v2.5-pro", "mimo-v2.5"):
+            parsed["max_tokens"] = 1000000
         body = json.dumps(parsed, ensure_ascii=False)
         log(f"[{req_id}] 发送MIMO body={body[:300]}")
         if "/anthropic/" in path:
