@@ -159,6 +159,51 @@ func (m *Manager) RotateProxy() string {
 	return m.proxies[m.current]
 }
 
+// EnsureAvailable 确保当前代理可用，不可用则轮换，最多尝试全部 IP
+func (m *Manager) EnsureAvailable() string {
+	count := m.GetProxyCount()
+	if count == 0 {
+		return ""
+	}
+	for i := 0; i < count; i++ {
+		proxy := m.GetProxy()
+		if m.testProxy(proxy) {
+			return proxy
+		}
+		slog.Warn("代理不可用，切换下一个", "proxy", proxy)
+		m.RotateProxy()
+	}
+	return ""
+}
+
+// testProxy 测试代理 IP 是否可用（GET http://httpbin.org/ip，10 秒超时）
+func (m *Manager) testProxy(proxy string) bool {
+	if proxy == "" {
+		return false
+	}
+	protocol := m.pool.Protocol
+	if protocol == "" {
+		protocol = "http"
+	}
+	if !strings.Contains(proxy, "://") {
+		proxy = protocol + "://" + proxy
+	}
+	u, err := url.Parse(proxy)
+	if err != nil {
+		return false
+	}
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(u)},
+		Timeout:   10 * time.Second,
+	}
+	resp, err := client.Get("http://httpbin.org/ip")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
 // MarkUsed 标记代理已使用
 func (m *Manager) MarkUsed(ip string) {
 	m.mu.Lock()

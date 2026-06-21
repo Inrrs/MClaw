@@ -883,9 +883,16 @@ func (m *AccountManager) snapshotStatuses() map[string]*AccountStatus {
 
 func (m *AccountManager) doRequest(req *http.Request) (*http.Response, error) {
 	if m.proxyMgr != nil && m.proxyMgr.GetProxyCount() > 0 && strings.Contains(req.URL.Host, "xiaomimimo.com") {
+		// 先确保代理可用
+		proxy := m.proxyMgr.EnsureAvailable()
+		if proxy == "" {
+			slog.Warn("无可用代理，回退直连")
+			return m.httpCli.Do(req)
+		}
+
 		var lastErr error
 		for i := 0; i < 3; i++ {
-			proxy := m.proxyMgr.GetProxy()
+			proxy = m.proxyMgr.GetProxy()
 			transport := m.proxyMgr.GetTransport()
 			client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 
@@ -945,7 +952,7 @@ func (m *AccountManager) TriggerAccountRebuild(userID string) {
 	go m.tryCreateAndConnect()
 }
 
-// ForceInject 强制注入：跳过所有检查，直接断开旧连接并注入 bridge
+// ForceInject 强制注入：跳过所有检查（冻结/冷却/今日创建），直接创建+注入
 func (m *AccountManager) ForceInject(userID string) map[string]any {
 	m.mu.RLock()
 	account := m.getAccount(userID)
@@ -958,13 +965,42 @@ func (m *AccountManager) ForceInject(userID string) map[string]any {
 	m.pool.Remove(userID)
 	LogAccountInfo(userID, "强制注入：已断开旧 bridge")
 
+	// 清除所有限制标记
+	m.mu.Lock()
+	if s, ok := m.statuses[userID]; ok {
+		s.FrozenUntil = time.Time{}
+		s.LastFailTime = time.Time{}
+	}
+	m.mu.Unlock()
+	ClearTodayCreated(userID)
+
 	// 获取容器状态
 	status, remainSec, err := m.getContainerStatus(account)
 	if err != nil {
 		return map[string]any{"success": false, "error": fmt.Sprintf("检查状态失败: %v", err)}
 	}
-	if status != "AVAILABLE" {
-		return map[string]any{"success": false, "error": fmt.Sprintf("容器状态 %s，需要先创建", status)}
+
+	// 容器不存在，先创建
+	if status != "AVAILABLE" || remainSec <= 0 {
+		LogAccountInfo(userID, "强制注入：容器状态 %s，先创建", status)
+		if !m.createContainer(account) {
+			return map[string]any{"success": false, "error": "创建容器失败"}
+		}
+		// 等待容器就绪
+		for i := 0; i < 12; i++ {
+			time.Sleep(10 * time.Second)
+			status, remainSec, err = m.getContainerStatus(account)
+			if err != nil {
+				continue
+			}
+			if status == "AVAILABLE" {
+				break
+			}
+			LogAccountInfo(userID, "强制注入：等待容器就绪 (%d/12) status=%s", i+1, status)
+		}
+		if status != "AVAILABLE" {
+			return map[string]any{"success": false, "error": fmt.Sprintf("容器未就绪: %s", status)}
+		}
 	}
 
 	// 获取 ticket
@@ -983,6 +1019,7 @@ func (m *AccountManager) ForceInject(userID string) map[string]any {
 	// 设置为当前账号
 	m.setCurrentAccount(userID, remainSec)
 	m.startCountdown(userID, time.Duration(remainSec)*time.Second)
+	go SaveManagerState(m.getCurrentUserID(), m.snapshotStatuses())
 	LogAccountInfo(userID, "强制注入成功，切换为当前账号，剩余: %d秒", remainSec)
 	return map[string]any{"success": true, "remain_sec": remainSec}
 }
