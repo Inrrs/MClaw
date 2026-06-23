@@ -1,6 +1,7 @@
 # 编译输出
 mclaw
 *.exe
+MClaw.tar
 
 # 环境变量
 .env
