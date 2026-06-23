@@ -163,7 +163,7 @@ func (m *AccountManager) tryReuseOrConnect() {
 			status, remainSec, err := m.getContainerStatus(&savedCurrent.Account)
 			if err == nil && status == "AVAILABLE" && remainSec > 300 {
 				LogAccountInfo(savedCurrent.Account.UserID, "容器可用，等待 bridge 自动重连... 剩余: %d秒", remainSec)
-				if m.waitForBridgeReconnect(savedCurrent.Account.UserID, 60*time.Second) {
+				if m.waitForBridgeReconnect(savedCurrent.Account.UserID, 5*time.Minute) {
 					LogAccountInfo(savedCurrent.Account.UserID, "bridge 已自动重连，跳过注入")
 					m.setCurrentAccount(savedCurrent.Account.UserID, remainSec)
 					m.startCountdown(savedCurrent.Account.UserID, time.Duration(remainSec)*time.Second)
@@ -753,14 +753,7 @@ func (m *AccountManager) injectBridge(account *Account, ticket string) bool {
 	if !injectBridgeImpl(m, account, ticket) {
 		return false
 	}
-	// 注入完成后等待 bridge 进程启动并连入 gateway
-	// bridge.py 需要：安装依赖 → 写脚本 → 启动进程 → 连接 WS
-	LogAccountInfo(account.UserID, "注入完成，等待 bridge 连入 gateway...")
-	if !m.waitForBridgeReconnect(account.UserID, 5*time.Minute) {
-		LogAccountError(account.UserID, "bridge 未在 5 分钟内连入 gateway")
-		return false
-	}
-	LogAccountInfo(account.UserID, "bridge 已连入 gateway，注入成功")
+	// executeInjection 内部已处理节点上线等待
 	return true
 }
 

@@ -159,12 +159,13 @@ func (m *Manager) RotateProxy() string {
 	return m.proxies[m.current]
 }
 
-// EnsureAvailable 确保当前代理可用，不可用则轮换，最多尝试全部 IP
+// EnsureAvailable 确保当前代理可用，不可用则轮换，直到找到可用 IP 或代理池耗尽
 func (m *Manager) EnsureAvailable() string {
 	count := m.GetProxyCount()
 	if count == 0 {
 		return ""
 	}
+	// 第一轮：尝试当前所有 IP
 	for i := 0; i < count; i++ {
 		proxy := m.GetProxy()
 		if m.testProxy(proxy) {
@@ -173,6 +174,24 @@ func (m *Manager) EnsureAvailable() string {
 		slog.Warn("代理不可用，切换下一个", "proxy", proxy)
 		m.RotateProxy()
 	}
+	// 全部不可用，刷新代理池获取新 IP
+	slog.Info("当前代理池全部不可用，尝试刷新")
+	m.refresh()
+	newCount := m.GetProxyCount()
+	if newCount == 0 {
+		return ""
+	}
+	// 第二轮：尝试新 IP
+	for i := 0; i < newCount; i++ {
+		proxy := m.GetProxy()
+		if m.testProxy(proxy) {
+			return proxy
+		}
+		slog.Warn("新代理不可用，切换下一个", "proxy", proxy)
+		m.RotateProxy()
+	}
+	// 刷新后仍全部不可用，代理池额度可能用完了
+	slog.Warn("代理池额度可能已耗尽，所有代理均不可用")
 	return ""
 }
 

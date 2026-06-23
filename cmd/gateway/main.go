@@ -92,8 +92,7 @@ func main() {
 
 	nodePool.SetOnNodeDown(func(nodeID string) {
 		slog.Info("节点下线，等待 bridge 自动重连", "node", nodeID)
-		// bridge 脚本有自动重连机制，等待 45 秒后再决定是否重建
-		accountMgr.TriggerAccountRebuildWithGrace(nodeID, 45*time.Second)
+		accountMgr.TriggerAccountRebuildWithGrace(nodeID, 60*time.Second)
 	})
 
 	// 启动僵尸请求清理

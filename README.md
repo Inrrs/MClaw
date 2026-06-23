@@ -178,6 +178,9 @@ MClaw/
 │       ├── handler.go           # WebUI API + 页面渲染
 │       ├── auth.go              # WebUI 路由注册
 │       └── static/index.html    # 管理面板（go:embed）
+├── scripts/
+│   ├── bridge.py              # Bridge 脚本（独立仓库：github.com/Inrrs/MClaw-skill）
+│   └── SKILL.md               # Bridge 安全审计声明
 ├── data/
 │   └── config.example.json      # 配置示例
 ├── users/                       # 账号数据（运行时生成）
@@ -260,6 +263,32 @@ docker run -d \
 ```bash
 docker compose up -d
 ```
+
+## Bridge Skill 架构
+
+Bridge 脚本（运行在 Claw 容器内的反向代理客户端）采用 **Skill 模式**，与网关主程序解耦：
+
+```
+scripts/bridge.py   ← 独立文件，可随时更新，无需重编译 Go
+        ↓ (go:embed)
+internal/manager/bridge_fallback.py   ← 内置 fallback，确保始终可用
+        ↓
+inject.go → 注入到 Claw 容器运行
+```
+
+**Bridge Skill 独立仓库**：[Inrrs/MClaw-skill](https://github.com/Inrrs/MClaw-skill)
+
+**加载优先级**：
+
+| 优先级 | 来源 | 场景 |
+|:---:|------|------|
+| 1 | 环境变量 `MCLAW_BRIDGE_SCRIPT` | 指定自定义脚本路径 |
+| 2 | `scripts/bridge.py` | 项目目录下直接修改 |
+| 3 | `~/.openclaw/skills/mclaw-bridge/bridge.py` | 从 MClaw-skill 仓库安装到 OpenClaw |
+| 4 | 可执行文件同目录 `scripts/bridge.py` | Docker/二进制部署 |
+| 5 | go:embed 内置 fallback | 无外部文件时自动回退 |
+
+更新 bridge 逻辑只需修改 `scripts/bridge.py`，重启网关即可生效，无需重新编译。
 
 ## 安全特性
 
