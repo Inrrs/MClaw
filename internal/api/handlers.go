@@ -21,12 +21,20 @@ import (
 func AuthMiddleware(apiKey string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var token string
+			// 先检查 Authorization: Bearer
 			auth := r.Header.Get("Authorization")
-			if !strings.HasPrefix(auth, "Bearer ") {
+			if strings.HasPrefix(auth, "Bearer ") {
+				token = strings.TrimPrefix(auth, "Bearer ")
+			}
+			// 兼容 Anthropic SDK 的 x-api-key
+			if token == "" {
+				token = r.Header.Get("x-api-key")
+			}
+			if token == "" {
 				writeError(w, http.StatusUnauthorized, "Unauthorized")
 				return
 			}
-			token := strings.TrimPrefix(auth, "Bearer ")
 			if subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
 				writeError(w, http.StatusUnauthorized, "Unauthorized")
 				return
@@ -402,7 +410,8 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		handleProxyRequest(r.Context(), pool, "/v1/messages", false, w, body)
+		// 保留原始路径，让 bridge 区分 OpenAI/Anthropic 格式
+		handleProxyRequest(r.Context(), pool, r.URL.Path, false, w, body)
 	}
 }
 

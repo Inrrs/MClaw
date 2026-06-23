@@ -107,7 +107,7 @@ func main() {
 	// WebSocket
 	r.Get("/ws", gateway.HandleWebSocket(nodePool, cfg.Auth.APIKey))
 
-	// API
+	// API (OpenAI 兼容)
 	r.Route("/v1", func(r chi.Router) {
 		if cfg.Auth.APIKey != "" {
 			r.Use(api.AuthMiddleware(cfg.Auth.APIKey))
@@ -116,6 +116,14 @@ func main() {
 		r.Post("/responses", api.HandleResponses(nodePool))
 		r.Post("/messages", api.HandleMessages(nodePool))
 		r.Get("/models", api.HandleModels(nodePool))
+	})
+
+	// API (Anthropic 兼容)
+	r.Route("/anthropic/v1", func(r chi.Router) {
+		if cfg.Auth.APIKey != "" {
+			r.Use(api.AuthMiddleware(cfg.Auth.APIKey))
+		}
+		r.Post("/messages", api.HandleMessages(nodePool))
 	})
 
 	// 模型映射
