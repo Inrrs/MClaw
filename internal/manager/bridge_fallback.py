@@ -3,7 +3,7 @@
 MClaw Bridge (内置 fallback 版本)
 
 此文件通过 go:embed 嵌入到 MClaw 二进制中，作为外部 scripts/bridge.py 的回退。
-WS_URL 通过 %s 占位符由 Go fmt.Sprintf 在运行时注入。
+WS_URL 通过占位符由 Go PrepareBridgeCode 在运行时注入。
 
 ⚠️ 自动生成文件 — 请勿手动编辑！
    修改源码后运行: python3 scripts/build_fallback.py
@@ -28,7 +28,7 @@ def _load_mimo_config():
 _cfg_key, _cfg_base = _load_mimo_config()
 KEY = os.environ.get("MIMO_API_KEY") or _cfg_key
 BASE = _cfg_base
-WS_URL_B64 = "d3NzOi8vYWkuaW5ycnMuY24vd3M/YWNjb3VudD02ODgzMTA5MTMwJnRva2VuPXNrLWNpbnJycw=="
+WS_URL_B64 = "%s"
 WS_URL = base64.b64decode(WS_URL_B64).decode() if WS_URL_B64 != "%s" else ""
 SYSTEM_PREFIX = "You are a personal assistant running inside OpenClaw."
 
