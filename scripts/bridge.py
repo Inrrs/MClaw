@@ -293,17 +293,28 @@ async def handle_request(ws, req, client, lock):
         body = req.get("body","")
         parsed = body if isinstance(body, dict) else json.loads(body)
         path = req.get("path","")
+        is_anthropic = "/anthropic/" in path
         model = parsed.get("model","mimo-v2.5-pro")
         stream = parsed.get("stream", False)
         max_tokens = parsed.get("max_tokens", 4096)
         tools = parsed.get("tools")
         log(f"[{req_id}] path={path} model={model} stream={stream} tools={len(tools) if tools else 0}")
-        messages = convert_messages(parsed, path)
-        log(f"[{req_id}] msgs={len(messages)} sys_ok={messages[0].get('content','').startswith(SYSTEM_PREFIX)}")
+
+        if is_anthropic:
+            # Anthropic path: convert messages and tools
+            messages = convert_messages(parsed, path)
+            openai_tools = convert_anthropic_tools(tools)
+        else:
+            # OpenAI path: pass through messages as-is, just ensure system prefix
+            messages = []
+            for m in parsed.get("messages",[]):
+                messages.append(dict(m))
+            messages = fix_system_message(messages)
+            openai_tools = tools  # Already OpenAI format
+
+        log(f"[{req_id}] msgs={len(messages)}")
         if not max_tokens or max_tokens < 100: max_tokens = 4096
         req_body = {"model": model, "messages": messages, "max_tokens": max_tokens, "stream": stream}
-        # Convert and add tools
-        openai_tools = convert_anthropic_tools(tools)
         if openai_tools:
             req_body["tools"] = openai_tools
         req_body_str = json.dumps(req_body, ensure_ascii=False)
@@ -314,15 +325,25 @@ async def handle_request(ws, req, client, lock):
             log(f"[{req_id}] status={r.status_code}")
             await safe_send(ws, lock, {"req_id": req_id, "type": "start", "status": r.status_code, "headers": dict(r.headers)})
             if r.status_code == 200:
-                if stream:
-                    await stream_convert(ws, lock, req_id, r)
+                if is_anthropic:
+                    # Convert to Anthropic format
+                    if stream:
+                        await stream_convert(ws, lock, req_id, r)
+                    else:
+                        resp_text = ""
+                        async for chunk in r.aiter_text(): resp_text += chunk
+                        oai = json.loads(resp_text)
+                        anthropic = openai_to_anthropic(oai)
+                        await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": json.dumps(anthropic, ensure_ascii=False)})
+                        log(f"[{req_id}] converted ok stop={anthropic.get('stop_reason')}")
                 else:
-                    resp_text = ""
-                    async for chunk in r.aiter_text(): resp_text += chunk
-                    oai = json.loads(resp_text)
-                    anthropic = openai_to_anthropic(oai)
-                    await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": json.dumps(anthropic, ensure_ascii=False)})
-                    log(f"[{req_id}] converted ok stop={anthropic.get('stop_reason')} tools={sum(1 for b in anthropic.get('content',[]) if b.get('type')=='tool_use')}")
+                    # OpenAI path: pass through raw response
+                    total = 0
+                    async for chunk in r.aiter_text():
+                        if chunk:
+                            total += len(chunk)
+                            await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": chunk})
+                    log(f"[{req_id}] passthrough {total} bytes")
             else:
                 err = ""
                 async for chunk in r.aiter_text(): err += chunk
