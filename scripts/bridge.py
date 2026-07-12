@@ -351,11 +351,17 @@ async def handle_request(ws, req, client, lock):
             msgs = parsed.get("messages", [])
             parsed["messages"] = [{"role": "system", "content": REQUIRED_SYSTEM_PROMPT}] + msgs
 
-        # 推理模型添加 thinking 参数
+        # 推理模型添加 thinking 参数（除非请求方明确禁用）
         base_model = model.split("/")[-1] if "/" in model else model
         if base_model in REASONING_MODELS:
-            parsed["thinking"] = {"type": "enabled"}
-            parsed["reasoning_effort"] = "high"
+            # 检查是否已设置 thinking（尊重请求方的配置）
+            existing_thinking = parsed.get("thinking", {})
+            if isinstance(existing_thinking, dict) and existing_thinking.get("type") == "disabled":
+                log(f"[{req_id}] thinking 已禁用，跳过")
+            else:
+                parsed["thinking"] = {"type": "enabled"}
+                if "reasoning_effort" not in parsed:
+                    parsed["reasoning_effort"] = "high"
 
         # 默认 max_tokens
         if not parsed.get("max_tokens") and base_model in ("mimo-v2.5-pro", "mimo-v2.5"):
@@ -369,8 +375,22 @@ async def handle_request(ws, req, client, lock):
         auth_hdr = {"Authorization": f"Bearer {KEY}"}
         is_stream = parsed.get("stream", False)
 
+        # 请求级超时保护（120 秒）
+        await _do_http_request(ws, req_id, client, lock, url, auth_hdr, body, is_anthropic, is_stream)
+
+    except asyncio.TimeoutError:
+        log(f"[{req_id}] 请求超时 (120s)")
+        await safe_send(ws, lock, {"req_id": req_id, "type": "error", "status": 504, "body": json.dumps({"error": {"message": "Bridge request timeout (120s)", "code": 504}})})
+    except Exception as e:
+        log(f"[{req_id}] 请求失败: {e}\n{traceback.format_exc()}")
+        await safe_send(ws, lock, {"req_id": req_id, "type": "error", "body": str(e)})
+
+
+async def _do_http_request(ws, req_id, client, lock, url, auth_hdr, body, is_anthropic, is_stream):
+    """实际 HTTP 请求 + 响应处理（被 handle_request 调用，支持超时）"""
+    async with asyncio.timeout(120):
         async with client.stream(
-            method=req.get("method", "POST"),
+            method="POST",
             url=url,
             headers={**auth_hdr, "Content-Type": "application/json"},
             content=body,
@@ -433,10 +453,6 @@ async def handle_request(ws, req, client, lock):
                         await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": chunk})
 
             await safe_send(ws, lock, {"req_id": req_id, "type": "finish"})
-
-    except Exception as e:
-        log(f"[{req_id}] 请求失败: {e}\n{traceback.format_exc()}")
-        await safe_send(ws, lock, {"req_id": req_id, "type": "error", "body": str(e)})
 
 
 # ─── 模型同步 ────────────────────────────────────────────────

@@ -348,7 +348,8 @@ func extractErrorMessage(body json.RawMessage) string {
 }
 
 // handleProxyRequest 通用代理请求处理（模型映射 + 发送 + 流式/非流式分发）
-func handleProxyRequest(ctx context.Context, pool *gateway.NodePool, path string, applyMapping bool, w http.ResponseWriter, body []byte) {
+// prepareRequest 预处理请求体：模型映射 + 图片降级 + 格式规范化
+func prepareRequest(body []byte, applyMapping bool) []byte {
 	if applyMapping {
 		model := getRequestModel(body)
 		if model != "" {
@@ -358,7 +359,6 @@ func handleProxyRequest(ctx context.Context, pool *gateway.NodePool, path string
 				slog.Debug("模型映射", "from", model, "to", mapped)
 			}
 		}
-
 		if containsImage(body) {
 			curModel := getRequestModel(body)
 			if curModel != "" && !strings.Contains(curModel, "mimo-v2.5") {
@@ -367,9 +367,11 @@ func handleProxyRequest(ctx context.Context, pool *gateway.NodePool, path string
 			}
 		}
 	}
+	return normalizeBody(body)
+}
 
-	// 规范化请求体（移除 MIMO 不支持的字段，规范化 content 格式）
-	body = normalizeBody(body)
+func handleProxyRequest(ctx context.Context, pool *gateway.NodePool, path string, applyMapping bool, w http.ResponseWriter, body []byte) {
+	body = prepareRequest(body, applyMapping)
 
 	pending, node, err := sendToAvailableNode(pool, "POST", path, body)
 	if err != nil {

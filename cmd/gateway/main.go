@@ -18,7 +18,6 @@ import (
 	"mclaw/internal/gateway"
 	"mclaw/internal/logger"
 	"mclaw/internal/manager"
-	"mclaw/internal/persistence"
 	"mclaw/internal/proxy"
 	"mclaw/internal/webui"
 
@@ -51,15 +50,6 @@ func main() {
 
 	// 初始化鉴权
 	authMgr := auth.New(cfg.Auth.APIKey, cfg.Auth.WebUIUser, cfg.Auth.WebUIPass, "")
-
-	// 初始化 SQLite
-	db, err := persistence.NewDB(cfg.DBPath())
-	if err != nil {
-		slog.Warn("SQLite 初始化失败，指标不持久化", "error", err)
-	}
-	if db != nil {
-		defer db.Close()
-	}
 
 	proxyMgr := proxy.NewManager(proxy.Pool{
 		URL:      cfg.Proxy.PoolURL,

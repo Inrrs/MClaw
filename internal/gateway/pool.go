@@ -140,6 +140,9 @@ type NodePool struct {
 	modelsFile      string     // 模型列表持久化文件
 	pendingRequests sync.Map   // 待处理请求存储
 	ErrorStore      *RequestErrorStore // 请求错误日志
+	availableMu     sync.RWMutex
+	availableCache  []*Node    // 缓存的可用节点列表
+	availableDirty  bool       // 缓存是否需要刷新
 }
 
 func NewNodePool() *NodePool {
@@ -201,6 +204,10 @@ func (p *NodePool) Add(node *Node) {
 	// 更新节点指标
 	total, available := p.countNodes()
 	metrics.Get().UpdateNodes(total, available)
+	// 标记缓存需要刷新
+	p.availableMu.Lock()
+	p.availableDirty = true
+	p.availableMu.Unlock()
 }
 
 func (p *NodePool) Remove(id string) {
@@ -211,6 +218,10 @@ func (p *NodePool) Remove(id string) {
 		// 更新节点指标
 		total, available := p.countNodes()
 		metrics.Get().UpdateNodes(total, available)
+		// 标记缓存需要刷新
+		p.availableMu.Lock()
+		p.availableDirty = true
+		p.availableMu.Unlock()
 		if p.onNodeDown != nil {
 			p.onNodeDown(id)
 		}
@@ -234,14 +245,29 @@ func (p *NodePool) GetAvailable() *Node {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	var available []*Node
-	p.nodes.Range(func(_, v any) bool {
-		node := v.(*Node)
-		if node.IsAvailable() {
-			available = append(available, node)
-		}
-		return true
-	})
+	// 检查缓存是否需要刷新
+	p.availableMu.RLock()
+	dirty := p.availableDirty
+	p.availableMu.RUnlock()
+
+	if dirty {
+		var available []*Node
+		p.nodes.Range(func(_, v any) bool {
+			node := v.(*Node)
+			if node.IsAvailable() {
+				available = append(available, node)
+			}
+			return true
+		})
+		p.availableMu.Lock()
+		p.availableCache = available
+		p.availableDirty = false
+		p.availableMu.Unlock()
+	}
+
+	p.availableMu.RLock()
+	available := p.availableCache
+	p.availableMu.RUnlock()
 
 	if len(available) == 0 {
 		return nil

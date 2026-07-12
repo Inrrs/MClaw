@@ -38,6 +38,9 @@ type Metrics struct {
 
 	// 启动时间
 	StartTime time.Time
+
+	// 价格配置
+	prices atomic.Pointer[PriceConfig]
 }
 
 var global *Metrics
@@ -80,15 +83,37 @@ func (m *Metrics) Uptime() time.Duration {
 	return time.Since(m.StartTime)
 }
 
-// MIMO 官方定价（元/百万 tokens，2026.5.27 降价后）
+// PriceConfig 价格配置（元/百万 tokens）
+type PriceConfig struct {
+	InputPerM  float64 `json:"input_per_m"`  // 未命中缓存输入价格
+	OutputPerM float64 `json:"output_per_m"` // 输出价格
+	CachePerM  float64 `json:"cache_per_m"`  // 缓存命中价格
+}
+
+// DefaultPrices MIMO 官方定价（2026.5.27 降价后）
 // 参考: https://platform.xiaomimimo.com/docs/price/pay-as-you-go
+var DefaultPrices = PriceConfig{
+	InputPerM:  2.0,   // mimo-v2.5-pro ¥3.00, mimo-v2.5 ¥1.00，取加权平均
+	OutputPerM: 4.0,   // mimo-v2.5-pro ¥6.00, mimo-v2.5 ¥2.00
+	CachePerM:  0.025, // mimo-v2.5-pro ¥0.025, mimo-v2.5 ¥0.02
+}
+
+func (m *Metrics) SetPrices(p PriceConfig) {
+	m.prices.Store(&p)
+}
+
+func (m *Metrics) getPrices() PriceConfig {
+	if p, ok := m.prices.Load().(*PriceConfig); ok && p != nil {
+		return *p
+	}
+	return DefaultPrices
+}
+
 func (m *Metrics) EstimatedCost() float64 {
-	// mimo-v2.5-pro: 缓存命中 ¥0.025, 未命中输入 ¥3.00, 输出 ¥6.00
-	// mimo-v2.5:     缓存命中 ¥0.02,  未命中输入 ¥1.00, 输出 ¥2.00
-	// 取加权平均（大部分请求映射到 pro）
-	inputPrice := 2.0 / 1e6    // 元/token (未命中缓存输入)
-	outputPrice := 4.0 / 1e6   // 元/token (输出)
-	cachePrice := 0.025 / 1e6  // 元/token (缓存命中)
+	p := m.getPrices()
+	inputPrice := p.InputPerM / 1e6
+	outputPrice := p.OutputPerM / 1e6
+	cachePrice := p.CachePerM / 1e6
 
 	input := float64(m.InputTokens.Load())
 	output := float64(m.OutputTokens.Load())

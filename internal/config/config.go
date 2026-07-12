@@ -57,11 +57,6 @@ func (c *Config) TodayCreatedPath() string {
 	return filepath.Join(c.GetDataDir(), "today_created.json")
 }
 
-// DBPath SQLite 数据库文件路径
-func (c *Config) DBPath() string {
-	return filepath.Join(c.GetDataDir(), "mclaw.db")
-}
-
 // GetDataDir 返回数据目录路径（默认 "data"）
 func (c *Config) GetDataDir() string {
 	if c.DataDir != "" {
