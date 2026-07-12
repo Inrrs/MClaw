@@ -162,9 +162,9 @@ async def handle_request(ws, req, client, lock):
             log(f"[{req_id}] Anthropic → OpenAI 格式转换")
             parsed = anthropic_to_openai(parsed)
         if "mimo-v2.5-pro" in parsed.get("model", ""):
+            required_prompt = "You are a personal assistant running inside OpenClaw."
             msgs = parsed.get("messages", [])
-            if not any(m.get("role") == "system" for m in msgs):
-                parsed["messages"] = [{"role": "system", "content": "You are a personal assistant running inside OpenClaw."}] + msgs
+            parsed["messages"] = [{"role": "system", "content": required_prompt}] + msgs
         if not parsed.get("max_tokens") and parsed.get("model") in ("mimo-v2.5-pro", "mimo-v2.5"):
             parsed["max_tokens"] = 131072
         body = json.dumps(parsed, ensure_ascii=False)

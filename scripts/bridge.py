@@ -320,9 +320,10 @@ async def handle_request(ws, req, client, lock):
 
         # mimo-v2.5-pro 必须有此 system prompt 才能正常调用
         if "mimo-v2.5-pro" in parsed.get("model", ""):
+            required_prompt = "You are a personal assistant running inside OpenClaw."
             msgs = parsed.get("messages", [])
-            if not any(m.get("role") == "system" for m in msgs):
-                parsed["messages"] = [{"role": "system", "content": "You are a personal assistant running inside OpenClaw."}] + msgs
+            # 始终注入，即使已有 system message
+            parsed["messages"] = [{"role": "system", "content": required_prompt}] + msgs
 
         # 默认 max_tokens
         if not parsed.get("max_tokens") and parsed.get("model") in ("mimo-v2.5-pro", "mimo-v2.5"):
