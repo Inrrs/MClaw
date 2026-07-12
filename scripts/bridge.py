@@ -22,6 +22,31 @@ WS_URL_B64 = "d3NzOi8vYWkuaW5ycnMuY24vd3M/YWNjb3VudD02ODgzMTA5MTMwJnRva2VuPXNrLW
 WS_URL = base64.b64decode(WS_URL_B64).decode() if WS_URL_B64 != "__WS_URL_B64__" else ""
 SYSTEM_PREFIX = "You are a personal assistant running inside OpenClaw."
 
+def strip_billing_header(text):
+    """Remove x-anthropic-billing-header from system prompt"""
+    if not text: return text
+    lines = text.split('\n')
+    result = []
+    for line in lines:
+        if line.strip().startswith('x-anthropic-billing-header:'):
+            continue
+        result.append(line)
+    return '\n'.join(result).strip()
+
+def clean_content_blocks(content):
+    """Remove empty text/content blocks from message content"""
+    if not isinstance(content, list): return content
+    cleaned = []
+    for b in content:
+        if not isinstance(b, dict): continue
+        btype = b.get('type', '')
+        if btype == 'text' and not b.get('text', '').strip():
+            continue  # Skip empty text blocks
+        if btype == 'thinking' and not b.get('thinking', '').strip():
+            continue  # Skip empty thinking blocks
+        cleaned.append(b)
+    return cleaned if cleaned else content
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -74,12 +99,15 @@ def convert_messages(parsed, path):
     if "/anthropic/" in path:
         s = parsed.get("system","")
         if s:
-            messages.append({"role": "system", "content": _to_text(s)})
+            s = strip_billing_header(_to_text(s))
+            if s:
+                messages.append({"role": "system", "content": s})
         for m in parsed.get("messages",[]):
             role = m.get("role","user")
             content = m.get("content","")
             # Handle tool_use blocks in assistant messages
             if isinstance(content, list):
+                content = clean_content_blocks(content)
                 has_tool_use = any(b.get("type") == "tool_use" for b in content if isinstance(b, dict))
                 has_tool_result = any(b.get("type") == "tool_result" for b in content if isinstance(b, dict))
                 if has_tool_use:
@@ -275,6 +303,11 @@ async def handle_request(ws, req, client, lock):
         stream = parsed.get("stream", False)
         max_tokens = parsed.get("max_tokens", 4096)
         tools = parsed.get("tools")
+
+        # Strip Anthropic-specific fields that MIMO doesn't need
+        for field in ("context_management", "metadata", "output_config", "thinking"):
+            parsed.pop(field, None)
+
         log(f"[{req_id}] path={path} model={model} stream={stream} tools={len(tools) if tools else 0}")
 
         if is_anthropic:
