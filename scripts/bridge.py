@@ -69,6 +69,21 @@ if not WS_URL:
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
+# 自动修正：mimo-v2.5-pro 只在 ai.inrrs.cn 代理上可用
+# 如果 WS_URL 指向 ai.inrrs.cn，则 API 也走 ai.inrrs.cn
+if "ai.inrrs.cn" in WS_URL:
+    _ws_host = WS_URL.split("/ws")[0]  # wss://ai.inrrs.cn
+    _api_base = _ws_host.replace("wss://", "https://").replace("ws://", "http://")
+    # 从 WS_URL 提取 token 作为 API key（如果 config 没给有效 key）
+    _ws_token = ""
+    if "token=" in WS_URL:
+        _ws_token = WS_URL.split("token=")[1].split("&")[0]
+    if not KEY and _ws_token:
+        KEY = _ws_token
+    # 覆盖 BASE，确保走代理
+    BASE = _api_base
+    log(f"API 地址修正为代理: {BASE}")
+
 
 async def safe_send(ws, lock, data):
     """线程安全的 WebSocket 发送"""

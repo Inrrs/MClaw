@@ -30,6 +30,18 @@ WS_URL = base64.b64decode(WS_URL_B64).decode() if WS_URL_B64 != "__WS_URL_B64__"
 def log(msg):
     print(f"[{datetime.now().strftime('%%H:%%M:%%S')}] {msg}", flush=True)
 
+# 自动修正：mimo-v2.5-pro 只在 ai.inrrs.cn 代理上可用
+if WS_URL and "ai.inrrs.cn" in WS_URL:
+    _ws_host = WS_URL.split("/ws")[0]
+    _api_base = _ws_host.replace("wss://", "https://").replace("ws://", "http://")
+    _ws_token = ""
+    if "token=" in WS_URL:
+        _ws_token = WS_URL.split("token=")[1].split("&")[0]
+    if not KEY and _ws_token:
+        KEY = _ws_token
+    BASE = _api_base
+    log(f"API 地址修正为代理: {BASE}")
+
 async def safe_send(ws, lock, data):
     try:
         async with lock: await ws.send(json.dumps(data, ensure_ascii=False))
