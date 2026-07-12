@@ -318,14 +318,8 @@ async def handle_request(ws, req, client, lock):
             parsed = anthropic_to_openai(parsed)
             log(f"[{req_id}] 转换后 keys={list(parsed.keys())}")
 
-        # 模型映射：mimo-v2.5-pro 在 api-oc 上不可用，降级为 mimo-v2.5
-        _model = parsed.get("model", "")
-        if "mimo-v2.5-pro" in _model:
-            parsed["model"] = _model.replace("mimo-v2.5-pro", "mimo-v2.5")
-            log(f"[{req_id}] 模型降级: {_model} → {parsed['model']}")
-
-        # 自动补充默认 system prompt
-        if parsed.get("model") == "mimo-v2.5":
+        # mimo-v2.5-pro 必须有此 system prompt 才能正常调用
+        if "mimo-v2.5-pro" in parsed.get("model", ""):
             msgs = parsed.get("messages", [])
             if not any(m.get("role") == "system" for m in msgs):
                 parsed["messages"] = [{"role": "system", "content": "You are a personal assistant running inside OpenClaw."}] + msgs

@@ -161,11 +161,7 @@ async def handle_request(ws, req, client, lock):
         if is_anthropic:
             log(f"[{req_id}] Anthropic → OpenAI 格式转换")
             parsed = anthropic_to_openai(parsed)
-        _model = parsed.get("model", "")
-        if "mimo-v2.5-pro" in _model:
-            parsed["model"] = _model.replace("mimo-v2.5-pro", "mimo-v2.5")
-            log(f"[{req_id}] 模型降级: {_model} → {parsed['model']}")
-        if parsed.get("model") == "mimo-v2.5":
+        if "mimo-v2.5-pro" in parsed.get("model", ""):
             msgs = parsed.get("messages", [])
             if not any(m.get("role") == "system" for m in msgs):
                 parsed["messages"] = [{"role": "system", "content": "You are a personal assistant running inside OpenClaw."}] + msgs
