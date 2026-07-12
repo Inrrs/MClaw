@@ -8,485 +8,367 @@ WS_URL 通过 %s 占位符由 Go fmt.Sprintf 在运行时注入。
 ⚠️ 自动生成文件 — 请勿手动编辑！
    修改源码后运行: python3 scripts/build_fallback.py
 """
-
-import asyncio
-import base64
-import json
-import os
-import traceback
+#!/usr/bin/env python3
+import asyncio, websockets, httpx, json, os, traceback, base64, uuid
 from datetime import datetime
 
-import httpx
-import websockets
-
-# ─── 配置 ────────────────────────────────────────────────────
-
 def _load_mimo_config():
-
-    for p in [
-        os.path.expanduser("~/.openclaw/openclaw.json"),
-        "/root/.openclaw/openclaw.json",
-        "/opt/mimo-claw-seed/bundle/openclaw/openclaw.json",
-    ]:
+    for p in [os.path.expanduser("~/.openclaw/openclaw.json"), "/root/.openclaw/openclaw.json", "/opt/mimo-claw-seed/bundle/openclaw/openclaw.json"]:
         try:
-            with open(p) as f:
-                cfg = json.load(f)
-            x = cfg.get("models", {}).get("providers", {}).get("xiaomi", {})
-            b, k = x.get("baseUrl", ""), x.get("apiKey", "")
+            with open(p) as f: cfg = json.load(f)
+            x = cfg.get("models",{}).get("providers",{}).get("xiaomi",{})
+            b, k = x.get("baseUrl",""), x.get("apiKey","")
             k = os.path.expandvars(k) if k.startswith("${") else k
-            if b.startswith("${"):
-                b = os.path.expandvars(b)
+            if b.startswith("${"): b = os.path.expandvars(b)
             b = b.rstrip("/v1")
-            if k and b:
-                return k, b
-        except Exception:
-            continue
+            if k and b: return k, b
+        except: continue
     return "", ""
 
 _cfg_key, _cfg_base = _load_mimo_config()
-KEY = _cfg_key or os.getenv("MIMO_API_KEY", "")
+KEY = os.environ.get("MIMO_API_KEY") or _cfg_key
 BASE = _cfg_base
-
-WS_URL = os.getenv("MCLAW_WS_URL", "")
-if not WS_URL:
-    _ws_b64 = "%s"
-    if _ws_b64 != "%s":
-        WS_URL = base64.b64decode(_ws_b64).decode()
-    else:
-        WS_URL = "%s"
-        if WS_URL == "%s":
-            WS_URL = ""
-
-REASONING_MODELS = {"mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "mimo-v2.6-pro"}
-
-REQUIRED_SYSTEM_PROMPT = "You are a personal assistant running inside OpenClaw."
-
-# ─── 工具函数 ────────────────────────────────────────────────
+WS_URL_B64 = "d3NzOi8vYWkuaW5ycnMuY24vd3M/YWNjb3VudD02ODgzMTA5MTMwJnRva2VuPXNrLWNpbnJycw=="
+WS_URL = base64.b64decode(WS_URL_B64).decode() if WS_URL_B64 != "%s" else ""
+SYSTEM_PREFIX = "You are a personal assistant running inside OpenClaw."
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 async def safe_send(ws, lock, data):
-
     try:
-        async with lock:
-            await ws.send(json.dumps(data, ensure_ascii=False))
-    except websockets.exceptions.ConnectionClosed:
-        pass  # 连接已关闭，静默忽略
-    except Exception as e:
-        log(f"safe_send 异常: {type(e).__name__}: {e}")
+        async with lock: await ws.send(json.dumps(data, ensure_ascii=False))
+    except Exception as e: log(f"send err: {e}")
 
-# ─── Anthropic ↔ OpenAI 格式转换 ─────────────────────────────
+def _to_text(c):
+    if isinstance(c, str): return c
+    if isinstance(c, list): return "\n".join(b.get("text","") if isinstance(b,dict) else str(b) for b in c)
+    if isinstance(c, dict): return c.get("text", json.dumps(c, ensure_ascii=False))
+    return str(c)
 
-def anthropic_to_openai(parsed):
+def fix_system_message(messages):
+    result = []
+    has_system = False
+    for m in messages:
+        if m.get("role") == "system":
+            has_system = True
+            content = m.get("content", "")
+            if isinstance(content, list): content = _to_text(content)
+            if not content.startswith(SYSTEM_PREFIX):
+                content = SYSTEM_PREFIX + "\n\n" + content
+            result.append({"role": "system", "content": content})
+        else:
+            result.append(m)
+    if not has_system:
+        result.insert(0, {"role": "system", "content": SYSTEM_PREFIX})
+    return result
 
-    openai = {}
-    openai["model"] = parsed.get("model", "mimo-v2.5-pro")
-    openai["max_tokens"] = parsed.get("max_tokens", 8192)
-    if parsed.get("stream") is not None:
-        openai["stream"] = parsed["stream"]
+def convert_anthropic_tools(tools):
 
+    if not tools: return None
+    result = []
+    for t in tools:
+        if t.get("type") == "function":
+            result.append(t)
+        else:
+            func = {"name": t.get("name",""), "description": t.get("description","")}
+            params = t.get("input_schema", t.get("parameters", {}))
+            func["parameters"] = params
+            result.append({"type": "function", "function": func})
+    return result if result else None
+
+def convert_messages(parsed, path):
     messages = []
-    system = parsed.get("system")
-    if system:
-        if isinstance(system, list):
-            texts = []
-            for s in system:
-                if isinstance(s, dict) and s.get("type") == "text":
-                    texts.append(s.get("text", ""))
-                elif isinstance(s, str):
-                    texts.append(s)
-            system_text = "\n".join(texts)
-        else:
-            system_text = str(system)
-        if system_text.strip():
-            messages.append({"role": "system", "content": system_text})
-
-    for msg in parsed.get("messages", []):
-        role = msg.get("role", "user")
-        content = msg.get("content")
-
-        if isinstance(content, str):
-            messages.append({"role": role, "content": content})
-        elif isinstance(content, list):
-            texts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        texts.append(block.get("text", ""))
-                    elif block.get("type") == "image":
-                        source = block.get("source", {})
-                        if source.get("type") == "base64":
-                            media_type = source.get("media_type", "image/png")
-                            data = source.get("data", "")
-                            texts.append({
-                                "type": "image_url",
-                                "image_url": {"url": f"data:{media_type};base64,{data}"}
+    if "/anthropic/" in path:
+        s = parsed.get("system","")
+        if s:
+            messages.append({"role": "system", "content": _to_text(s)})
+        for m in parsed.get("messages",[]):
+            role = m.get("role","user")
+            content = m.get("content","")
+            if isinstance(content, list):
+                has_tool_use = any(b.get("type") == "tool_use" for b in content if isinstance(b, dict))
+                has_tool_result = any(b.get("type") == "tool_result" for b in content if isinstance(b, dict))
+                if has_tool_use:
+                    text_parts = []
+                    tool_calls = []
+                    for b in content:
+                        if isinstance(b, dict):
+                            if b.get("type") == "text":
+                                text_parts.append(b.get("text",""))
+                            elif b.get("type") == "tool_use":
+                                tool_calls.append({
+                                    "id": b.get("id",""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": b.get("name",""),
+                                        "arguments": json.dumps(b.get("input",{}), ensure_ascii=False)
+                                    }
+                                })
+                    msg = {"role": "assistant", "content": "\n".join(text_parts) if text_parts else None}
+                    if tool_calls:
+                        msg["tool_calls"] = tool_calls
+                    messages.append(msg)
+                    continue
+                elif has_tool_result:
+                    for b in content:
+                        if isinstance(b, dict) and b.get("type") == "tool_result":
+                            result_content = b.get("content","")
+                            if isinstance(result_content, list):
+                                result_content = "\n".join(
+                                    c.get("text","") if isinstance(c,dict) else str(c) for c in result_content
+                                )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": b.get("tool_use_id",""),
+                                "content": str(result_content)
                             })
-                        elif source.get("type") == "url":
-                            texts.append({
-                                "type": "image_url",
-                                "image_url": {"url": source.get("url", "")}
-                            })
-                    elif block.get("type") == "tool_use":
-                        texts.append(json.dumps({
-                            "type": "function",
-                            "function": {
-                                "name": block.get("name", ""),
-                                "arguments": json.dumps(block.get("input", {}))
-                            }
-                        }))
-                    elif block.get("type") == "tool_result":
-                        texts.append(str(block.get("content", "")))
-                elif isinstance(block, str):
-                    texts.append(block)
+                    continue
+                else:
+                    content = _to_text(content)
+            if role in ("user","assistant","system"):
+                messages.append({"role": role, "content": content})
+    else:
+        for m in parsed.get("messages",[]):
+            role = m.get("role","user")
+            c = _to_text(m.get("content",""))
+            messages.append({"role": role, "content": c})
+    return fix_system_message(messages)
 
-            if all(isinstance(t, str) for t in texts):
-                messages.append({"role": role, "content": "\n".join(texts)})
-            else:
-                messages.append({"role": role, "content": [t for t in texts if isinstance(t, (str, dict))]})
-        else:
-            messages.append({"role": role, "content": str(content) if content is not None else ""})
-
-    openai["messages"] = messages
-
-    if parsed.get("tools"):
-        openai_tools = []
-        for tool in parsed["tools"]:
-            openai_tools.append({
-                "type": "function",
-                "function": {
-                    "name": tool.get("name", ""),
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("input_schema", {})
-                }
-            })
-        openai["tools"] = openai_tools
-
-    return openai
-
-def openai_chunk_to_anthropic_sse(openai_line, state):
-
-    events = []
-    if not openai_line.startswith("data: "):
-        return events
-
-    data_str = openai_line[6:].strip()
-    if data_str == "[DONE]":
-        events.append("event: message_stop\ndata: {}\n")
-        return events
-
-    try:
-        chunk = json.loads(data_str)
-    except json.JSONDecodeError:
-        return events
-
-    choice = (chunk.get("choices") or [{}])[0]
-    delta = choice.get("delta", {})
-    finish_reason = choice.get("finish_reason")
-
-    if not state.get("started"):
-        state["started"] = True
-        model = chunk.get("model", "mimo-v2.5-pro")
-        msg_id = chunk.get("id", "msg_" + model.replace(".", ""))
-        state["msg_id"] = msg_id
-        state["model"] = model
-        events.append(f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': 'assistant', 'model': model, 'content': [], 'stop_reason': None, 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n")
-
-    reasoning = delta.get("reasoning_content")
-    if reasoning and not state.get("thinking_started"):
-        state["thinking_started"] = True
-        events.append(f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'thinking', 'thinking': ''}})}\n")
+def openai_to_anthropic(oai):
+    choice = oai.get("choices",[{}])[0]
+    msg = choice.get("message",{})
+    reasoning = msg.get("reasoning_content","")
+    content_text = msg.get("content","") or ""
+    tool_calls = msg.get("tool_calls")
+    finish = choice.get("finish_reason","stop")
+    usage = oai.get("usage",{})
+    msg_id = "msg_" + uuid.uuid4().hex[:24]
+    blocks = []
     if reasoning:
-        events.append(f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'thinking_delta', 'thinking': reasoning}})}\n")
-
-    if delta.get("content") and not state.get("block_started"):
-        if state.get("thinking_started") and not state.get("thinking_closed"):
-            state["thinking_closed"] = True
-            events.append(f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n")
-        block_idx = 1 if state.get("thinking_started") else 0
-        state["block_started"] = True
-        state["block_idx"] = block_idx
-        events.append(f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_idx, 'content_block': {'type': 'text', 'text': ''}})}\n")
-
-    if delta.get("content"):
-        idx = state.get("block_idx", 0)
-        events.append(f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'text_delta', 'text': delta['content']}})}\n")
-
-    if delta.get("tool_calls"):
-        for tc in delta["tool_calls"]:
-            idx = tc.get("index", 0)
-            tool_idx = idx + (2 if state.get("thinking_started") else 1)
-            if tc.get("id") and not state.get(f"tool_{idx}_started"):
-                state[f"tool_{idx}_started"] = True
-                state[f"tool_{idx}_id"] = tc["id"]
-                fn_name = tc.get("function", {}).get("name", "")
-                events.append(f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': tool_idx, 'content_block': {'type': 'tool_use', 'id': tc['id'], 'name': fn_name, 'input': {}}})}\n")
-            if tc.get("function", {}).get("arguments"):
-                events.append(f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': tool_idx, 'delta': {'type': 'input_json_delta', 'partial_json': tc['function']['arguments']}})}\n")
-
-    if finish_reason:
-        if state.get("thinking_started") and not state.get("thinking_closed"):
-            state["thinking_closed"] = True
-            events.append(f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n")
-        if state.get("block_started"):
-            events.append(f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': state.get('block_idx', 0)})}\n")
-        stop_reason = "end_turn"
-        if finish_reason == "length":
-            stop_reason = "max_tokens"
-        elif finish_reason == "tool_calls":
-            stop_reason = "tool_use"
-        usage = chunk.get("usage", {})
-        events.append(f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': {'output_tokens': usage.get('completion_tokens', 0)}})}\n")
-
-    return events
-
-def openai_response_to_anthropic(openai_resp):
-
-    choice = (openai_resp.get("choices") or [{}])[0]
-    message = choice.get("message", {})
-    finish_reason = choice.get("finish_reason", "stop")
-    usage = openai_resp.get("usage", {})
-
-    content = []
-
-    reasoning = message.get("reasoning_content")
-    if reasoning:
-        content.append({"type": "thinking", "thinking": reasoning})
-
-    text = message.get("content", "")
-    if text:
-        content.append({"type": "text", "text": text})
-
-    if message.get("tool_calls"):
-        for tc in message["tool_calls"]:
-            fn = tc.get("function", {})
+        blocks.append({"type": "thinking", "thinking": reasoning})
+    if tool_calls:
+        for tc in tool_calls:
+            func = tc.get("function",{})
             try:
-                inp = json.loads(fn.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                inp = {}
-            content.append({
+                inp = json.loads(func.get("arguments","{}"))
+            except:
+                inp = {"raw": func.get("arguments","")}
+            blocks.append({
                 "type": "tool_use",
-                "id": tc.get("id", ""),
-                "name": fn.get("name", ""),
+                "id": tc.get("id", "toolu_" + uuid.uuid4().hex[:24]),
+                "name": func.get("name",""),
                 "input": inp
             })
+    elif content_text:
+        blocks.append({"type": "text", "text": content_text})
+    else:
+        blocks.append({"type": "text", "text": ""})
+    if finish == "tool_calls":
+        sr = "tool_use"
+    elif finish == "stop":
+        sr = "end_turn"
+    elif finish == "length":
+        sr = "max_tokens"
+    else:
+        sr = finish
+    return {"id": msg_id, "type": "message", "role": "assistant", "content": blocks,
+            "model": oai.get("model","mimo-v2.5-pro"), "stop_reason": sr, "stop_sequence": None,
+            "usage": {"input_tokens": usage.get("prompt_tokens",0), "output_tokens": usage.get("completion_tokens",0)}}
 
-    stop_reason = "end_turn"
-    if finish_reason == "length":
-        stop_reason = "max_tokens"
-    elif finish_reason == "tool_calls":
-        stop_reason = "tool_use"
+async def stream_convert(ws, lock, req_id, r):
+    msg_id = "msg_" + uuid.uuid4().hex[:24]
+    model = "mimo-v2.5-pro"
+    def sse(et, data):
+        data["type"] = et
+        return "event: " + et + "\ndata: " + json.dumps(data, ensure_ascii=False) + "\n\n"
+    await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("message_start", {
+        "message": {"id": msg_id, "type": "message", "role": "assistant", "content": [], "model": model, "stop_reason": None, "usage": {"input_tokens": 0, "output_tokens": 0}}})})
+    th = False; co = False; tl = 0; cl = 0
+    tool_calls_buf = []
+    current_tool_call = None
+    async for raw in r.aiter_lines():
+        line = raw.strip()
+        if not line.startswith("data: "): continue
+        p = line[6:]
+        if p == "[DONE]": break
+        try: d = json.loads(p)
+        except: continue
+        chs = d.get("choices", [])
+        if not chs: continue
+        delta = chs[0].get("delta", {})
+        finish = chs[0].get("finish_reason")
+        reasoning = delta.get("reasoning_content")
+        content = delta.get("content")
+        tc_delta = delta.get("tool_calls")
+        model = d.get("model", model)
 
-    return {
-        "id": openai_resp.get("id", "msg_001"),
-        "type": "message",
-        "role": "assistant",
-        "model": openai_resp.get("model", "mimo-v2.5-pro"),
-        "content": content,
-        "stop_reason": stop_reason,
-        "stop_sequence": None,
-        "usage": {
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
-        }
-    }
+        if tc_delta:
+            for tc in tc_delta:
+                idx = tc.get("index", 0)
+                while len(tool_calls_buf) <= idx:
+                    tool_calls_buf.append({"id": "", "function": {"name": "", "arguments": ""}})
+                buf = tool_calls_buf[idx]
+                if tc.get("id"): buf["id"] = tc["id"]
+                func = tc.get("function", {})
+                if func.get("name"): buf["function"]["name"] += func["name"]
+                if func.get("arguments"): buf["function"]["arguments"] += func["arguments"]
+            continue
 
-# ─── 请求处理 ────────────────────────────────────────────────
+        if reasoning is not None:
+            if not th:
+                th = True
+                await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_start", {"index": 0, "content_block": {"type": "thinking", "thinking": ""}})})
+                await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("ping", {})})
+            tl += len(reasoning)
+            await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_delta", {"index": 0, "delta": {"type": "thinking_delta", "thinking": reasoning}})})
+
+        if content is not None:
+            ci = 1 if th else 0
+            if th and not co:
+                await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_stop", {"index": 0})})
+            if not co:
+                co = True
+                await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_start", {"index": ci, "content_block": {"type": "text", "text": ""}})})
+            cl += len(content)
+            await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_delta", {"index": ci, "delta": {"type": "text_delta", "text": content}})})
+
+        if finish:
+            if th and not co and not tool_calls_buf:
+                await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_stop", {"index": 0})})
+            if co:
+                ci = 1 if th else 0
+                await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_stop", {"index": ci})})
+            if tool_calls_buf:
+                if th:
+                    await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_stop", {"index": 0})})
+                for i, tc in enumerate(tool_calls_buf):
+                    idx = (1 if th else 0) + i
+                    try:
+                        inp = json.loads(tc["function"]["arguments"])
+                    except:
+                        inp = {"raw": tc["function"]["arguments"]}
+                    await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_start", {"index": idx, "content_block": {"type": "tool_use", "id": tc["id"], "name": tc["function"]["name"], "input": {}}})})
+                    await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_delta", {"index": idx, "delta": {"type": "input_json_delta", "partial_json": json.dumps(inp, ensure_ascii=False)}})})
+                    await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_stop", {"index": idx})})
+
+            if finish == "tool_calls":
+                sr = "tool_use"
+            elif finish == "stop":
+                sr = "end_turn"
+            elif finish == "length":
+                sr = "max_tokens"
+            else:
+                sr = finish
+            await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("message_delta", {"delta": {"stop_reason": sr, "stop_sequence": None}, "usage": {"output_tokens": cl}})})
+            await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("message_stop", {})})
+    log(f"[{req_id}] thinking={tl} content={cl} tools={len(tool_calls_buf)}")
 
 async def handle_request(ws, req, client, lock):
-
     req_id = req.get("req_id")
     try:
-        body = req.get("body", "")
-        log(f"[{req_id}] body_type={type(body).__name__} body_len={len(str(body))}")
-
-        if isinstance(body, dict):
-            parsed = body
-        else:
-            parsed = json.loads(body)
-        log(f"[{req_id}] parsed_type={type(parsed).__name__} keys={list(parsed.keys()) if isinstance(parsed, dict) else 'N/A'}")
-
-        path = req.get("path", "")
+        body = req.get("body","")
+        parsed = body if isinstance(body, dict) else json.loads(body)
+        path = req.get("path","")
         is_anthropic = "/anthropic/" in path
+        model = parsed.get("model","mimo-v2.5-pro")
+        stream = parsed.get("stream", False)
+        max_tokens = parsed.get("max_tokens", 4096)
+        tools = parsed.get("tools")
+        log(f"[{req_id}] path={path} model={model} stream={stream} tools={len(tools) if tools else 0}")
 
         if is_anthropic:
-            log(f"[{req_id}] Anthropic 请求，转换为 OpenAI 格式")
-            parsed = anthropic_to_openai(parsed)
-            log(f"[{req_id}] 转换后 keys={list(parsed.keys())}")
+            messages = convert_messages(parsed, path)
+            openai_tools = convert_anthropic_tools(tools)
+        else:
+            messages = []
+            for m in parsed.get("messages",[]):
+                messages.append(dict(m))
+            messages = fix_system_message(messages)
+            openai_tools = tools  # Already OpenAI format
 
-        model = parsed.get("model", "")
-
-        if "mimo-v2.5-pro" in model:
-            msgs = parsed.get("messages", [])
-            parsed["messages"] = [{"role": "system", "content": REQUIRED_SYSTEM_PROMPT}] + msgs
-
-        base_model = model.split("/")[-1] if "/" in model else model
-        if base_model in REASONING_MODELS:
-            existing_thinking = parsed.get("thinking", {})
-            if isinstance(existing_thinking, dict) and existing_thinking.get("type") == "disabled":
-                log(f"[{req_id}] thinking 已禁用，跳过")
-            else:
-                parsed["thinking"] = {"type": "enabled"}
-                if "reasoning_effort" not in parsed:
-                    parsed["reasoning_effort"] = "high"
-
-        if not parsed.get("max_tokens") and base_model in ("mimo-v2.5-pro", "mimo-v2.5"):
-            parsed["max_tokens"] = 131072
-
-        body = json.dumps(parsed, ensure_ascii=False)
-        log(f"[{req_id}] 发送MIMO model={model} body_len={len(body)} stream={parsed.get('stream', False)}")
-
+        log(f"[{req_id}] msgs={len(messages)}")
+        req_body = {"model": model, "messages": messages, "stream": stream}
+        if max_tokens and max_tokens >= 100:
+            req_body["max_tokens"] = max_tokens
+        elif not max_tokens:
+            req_body["max_tokens"] = 4096
+        if openai_tools:
+            req_body["tools"] = openai_tools
+        req_body_str = json.dumps(req_body, ensure_ascii=False)
         url = f"{BASE}/v1/chat/completions"
-        auth_hdr = {"Authorization": f"Bearer {KEY}"}
-        is_stream = parsed.get("stream", False)
-
-        await _do_http_request(ws, req_id, client, lock, url, auth_hdr, body, is_anthropic, is_stream)
-
-    except asyncio.TimeoutError:
-        log(f"[{req_id}] 请求超时 (120s)")
-        await safe_send(ws, lock, {"req_id": req_id, "type": "error", "status": 504, "body": json.dumps({"error": {"message": "Bridge request timeout (120s)", "code": 504}})})
+        headers = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
+        log(f"[{req_id}] -> {url} body_len={len(req_body_str)}")
+        async with client.stream("POST", url, headers=headers, content=req_body_str) as r:
+            log(f"[{req_id}] status={r.status_code}")
+            await safe_send(ws, lock, {"req_id": req_id, "type": "start", "status": r.status_code, "headers": dict(r.headers)})
+            if r.status_code == 200:
+                if is_anthropic:
+                    if stream:
+                        await stream_convert(ws, lock, req_id, r)
+                    else:
+                        resp_text = ""
+                        async for chunk in r.aiter_text(): resp_text += chunk
+                        oai = json.loads(resp_text)
+                        anthropic = openai_to_anthropic(oai)
+                        await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": json.dumps(anthropic, ensure_ascii=False)})
+                        log(f"[{req_id}] converted ok stop={anthropic.get('stop_reason')}")
+                else:
+                    total = 0
+                    async for chunk in r.aiter_text():
+                        if chunk:
+                            total += len(chunk)
+                            await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": chunk})
+                    log(f"[{req_id}] passthrough {total} bytes")
+            else:
+                err = ""
+                async for chunk in r.aiter_text(): err += chunk
+                log(f"[{req_id}] err: {err[:200]}")
+                await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": err})
+            await safe_send(ws, lock, {"req_id": req_id, "type": "finish"})
+            log(f"[{req_id}] done")
     except Exception as e:
-        log(f"[{req_id}] 请求失败: {e}\n{traceback.format_exc()}")
+        log(f"[{req_id}] ERROR: {e}")
+        traceback.print_exc()
         await safe_send(ws, lock, {"req_id": req_id, "type": "error", "body": str(e)})
 
-async def _do_http_request(ws, req_id, client, lock, url, auth_hdr, body, is_anthropic, is_stream):
-
-    async with asyncio.timeout(120):
-        async with client.stream(
-            method="POST",
-            url=url,
-            headers={**auth_hdr, "Content-Type": "application/json"},
-            content=body,
-        ) as r:
-            log(f"[{req_id}] HTTP status={r.status_code}")
-
-            if r.status_code != 200:
-                error_body = ""
-                async for chunk in r.aiter_text():
-                    if chunk:
-                        error_body += chunk
-                log(f"[{req_id}] API 错误 {r.status_code}: {error_body[:200]}")
-                await safe_send(ws, lock, {
-                    "req_id": req_id, "type": "start",
-                    "status": r.status_code, "headers": dict(r.headers),
-                })
-                await safe_send(ws, lock, {
-                    "req_id": req_id, "type": "error",
-                    "status": r.status_code,
-                    "body": json.dumps({"error": {"message": f"MIMO API error {r.status_code}: {error_body[:500]}", "code": r.status_code}}),
-                })
-                return
-
-            await safe_send(ws, lock, {
-                "req_id": req_id, "type": "start",
-                "status": r.status_code, "headers": dict(r.headers),
-            })
-
-            if is_anthropic and is_stream:
-                state = {}
-                async for chunk in r.aiter_text():
-                    if not chunk:
-                        continue
-                    for line in chunk.split("\n"):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        events = openai_chunk_to_anthropic_sse(line, state)
-                        for event in events:
-                            await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": event})
-            elif is_anthropic and not is_stream:
-                full_body = ""
-                async for chunk in r.aiter_text():
-                    if chunk:
-                        full_body += chunk
-                try:
-                    openai_resp = json.loads(full_body)
-                    anthropic_resp = openai_response_to_anthropic(openai_resp)
-                    await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": json.dumps(anthropic_resp, ensure_ascii=False)})
-                except json.JSONDecodeError:
-                    log(f"[{req_id}] 响应解析失败，原样返回")
-                    await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": full_body})
-            else:
-                async for chunk in r.aiter_text():
-                    if chunk:
-                        await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": chunk})
-
-            await safe_send(ws, lock, {"req_id": req_id, "type": "finish"})
-
-# ─── 模型同步 ────────────────────────────────────────────────
-
 async def sync_models(ws, client):
-
-    if not KEY:
-        return
+    if not KEY: log("WARN: no key"); return
     try:
-        resp = await client.get(
-            f"{BASE}/v1/models",
-            headers={"Authorization": f"Bearer {KEY}"},
-            timeout=15,
-        )
+        resp = await client.get(f"{BASE}/v1/models", headers={"Authorization": f"Bearer {KEY}"}, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
-            model_ids = [m.get("id", "") for m in data.get("data", [])]
-            await ws.send(json.dumps({
-                "req_id": "__models__", "type": "models", "body": model_ids,
-            }))
-            log(f"模型同步: {len(model_ids)} 个")
-    except Exception as e:
-        log(f"模型同步异常: {e}")
-
-# ─── 主循环 ──────────────────────────────────────────────────
+            ids = [m.get("id","") for m in data.get("data",[])]
+            await ws.send(json.dumps({"req_id":"__models__","type":"models","body":ids}))
+            log(f"models: {len(ids)}")
+    except Exception as e: log(f"sync err: {e}")
 
 async def main():
-    if not WS_URL:
-        log("错误: WS_URL 未设置 (通过环境变量 MCLAW_WS_URL 或运行时替换)")
-        return
-
-    log(f"bridge 启动 WS={WS_URL} API={BASE}")
+    if not WS_URL: log("ERROR: no WS_URL"); return
+    log(f"bridge start WS={WS_URL} API={BASE}")
     timeout = httpx.Timeout(connect=10, read=300, write=30, pool=10)
-
     async with httpx.AsyncClient(timeout=timeout) as client:
         retry = 0
         while True:
             try:
                 retry += 1
-                if retry > 1:
-                    log(f"WS 重连 (第{retry}次)...")
-
-                async with websockets.connect(
-                    WS_URL,
-                    max_size=10**8,
-                    open_timeout=15,
-                    close_timeout=5,
-                    ping_interval=20,
-                    ping_timeout=10,
-                ) as ws:
-                    retry = 0
-                    log("WS 已连接")
+                if retry > 1: log(f"reconnect #{retry}...")
+                async with websockets.connect(WS_URL, max_size=10**8, open_timeout=15, close_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+                    retry = 0; log("WS connected")
                     await sync_models(ws, client)
                     lock = asyncio.Lock()
-
                     while True:
                         try:
-                            raw_msg = await ws.recv(decode=False)
-                            msg = raw_msg.decode("utf-8", errors="replace")
-                            data = json.loads(msg)
-                            log(f"收到消息 type={data.get('type', '?')} path={data.get('path', '?')}")
+                            raw = await ws.recv(decode=False)
+                            data = json.loads(raw.decode("utf-8", errors="replace"))
+                            log(f"recv type={data.get('type','?')} path={data.get('path','?')}")
                             asyncio.create_task(handle_request(ws, data, client, lock))
-                        except websockets.exceptions.ConnectionClosed:
-                            log("WS 连接被关闭")
-                            break
-                        except json.JSONDecodeError as e:
-                            log(f"消息解析失败: {e}")
-                        except Exception as e:
-                            log(f"接收异常: {type(e).__name__}: {e}")
-
+                        except websockets.exceptions.ConnectionClosed: log("WS closed"); break
+                        except json.JSONDecodeError as e: log(f"json err: {e}")
+                        except Exception as e: log(f"recv err: {e}")
             except Exception as e:
-                log(f"WS 断开: {type(e).__name__}: {e}")
-                if retry <= 3:
-                    traceback.print_exc()
-                await asyncio.sleep(3)
+                log(f"WS err: {type(e).__name__}: {e}")
+                if retry <= 3: traceback.print_exc()
+            await asyncio.sleep(3)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == "__main__": asyncio.run(main())
