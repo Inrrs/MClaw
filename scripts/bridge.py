@@ -69,29 +69,6 @@ def convert_anthropic_tools(tools):
             result.append({"type": "function", "function": func})
     return result if result else None
 
-def convert_anthropic_content(content):
-    """Convert Anthropic message content to plain text, preserving tool_use and tool_result blocks"""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                btype = block.get("type", "")
-                if btype == "text":
-                    parts.append(block.get("text", ""))
-                elif btype == "tool_use":
-                    # Keep as structured data for OpenAI tool_calls conversion
-                    return content  # Return full list for special handling
-                elif btype == "tool_result":
-                    return content  # Return full list for special handling
-                else:
-                    parts.append(json.dumps(block, ensure_ascii=False))
-        return "\n".join(parts)
-    return str(content)
-
 def convert_messages(parsed, path):
     messages = []
     if "/anthropic/" in path:
@@ -313,8 +290,11 @@ async def handle_request(ws, req, client, lock):
             openai_tools = tools  # Already OpenAI format
 
         log(f"[{req_id}] msgs={len(messages)}")
-        if not max_tokens or max_tokens < 100: max_tokens = 4096
-        req_body = {"model": model, "messages": messages, "max_tokens": max_tokens, "stream": stream}
+        req_body = {"model": model, "messages": messages, "stream": stream}
+        if max_tokens and max_tokens >= 100:
+            req_body["max_tokens"] = max_tokens
+        elif not max_tokens:
+            req_body["max_tokens"] = 4096
         if openai_tools:
             req_body["tools"] = openai_tools
         req_body_str = json.dumps(req_body, ensure_ascii=False)
