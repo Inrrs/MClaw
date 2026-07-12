@@ -30,17 +30,6 @@ WS_URL = base64.b64decode(WS_URL_B64).decode() if WS_URL_B64 != "__WS_URL_B64__"
 def log(msg):
     print(f"[{datetime.now().strftime('%%H:%%M:%%S')}] {msg}", flush=True)
 
-# 自动修正：mimo-v2.5-pro 只在 ai.inrrs.cn 代理上可用
-if WS_URL and "ai.inrrs.cn" in WS_URL:
-    _ws_host = WS_URL.split("/ws")[0]
-    _api_base = _ws_host.replace("wss://", "https://").replace("ws://", "http://")
-    _ws_token = ""
-    if "token=" in WS_URL:
-        _ws_token = WS_URL.split("token=")[1].split("&")[0]
-    if not KEY and _ws_token:
-        KEY = _ws_token
-    BASE = _api_base
-    log(f"API 地址修正为代理: {BASE}")
 
 async def safe_send(ws, lock, data):
     try:
@@ -172,7 +161,11 @@ async def handle_request(ws, req, client, lock):
         if is_anthropic:
             log(f"[{req_id}] Anthropic → OpenAI 格式转换")
             parsed = anthropic_to_openai(parsed)
-        if parsed.get("model") == "mimo-v2.5-pro":
+        _model = parsed.get("model", "")
+        if "mimo-v2.5-pro" in _model:
+            parsed["model"] = _model.replace("mimo-v2.5-pro", "mimo-v2.5")
+            log(f"[{req_id}] 模型降级: {_model} → {parsed['model']}")
+        if parsed.get("model") == "mimo-v2.5":
             msgs = parsed.get("messages", [])
             if not any(m.get("role") == "system" for m in msgs):
                 parsed["messages"] = [{"role": "system", "content": "You are a personal assistant running inside OpenClaw."}] + msgs

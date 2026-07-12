@@ -69,20 +69,6 @@ if not WS_URL:
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# 自动修正：mimo-v2.5-pro 只在 ai.inrrs.cn 代理上可用
-# 如果 WS_URL 指向 ai.inrrs.cn，则 API 也走 ai.inrrs.cn
-if "ai.inrrs.cn" in WS_URL:
-    _ws_host = WS_URL.split("/ws")[0]  # wss://ai.inrrs.cn
-    _api_base = _ws_host.replace("wss://", "https://").replace("ws://", "http://")
-    # 从 WS_URL 提取 token 作为 API key（如果 config 没给有效 key）
-    _ws_token = ""
-    if "token=" in WS_URL:
-        _ws_token = WS_URL.split("token=")[1].split("&")[0]
-    if not KEY and _ws_token:
-        KEY = _ws_token
-    # 覆盖 BASE，确保走代理
-    BASE = _api_base
-    log(f"API 地址修正为代理: {BASE}")
 
 
 async def safe_send(ws, lock, data):
@@ -332,8 +318,14 @@ async def handle_request(ws, req, client, lock):
             parsed = anthropic_to_openai(parsed)
             log(f"[{req_id}] 转换后 keys={list(parsed.keys())}")
 
+        # 模型映射：mimo-v2.5-pro 在 api-oc 上不可用，降级为 mimo-v2.5
+        _model = parsed.get("model", "")
+        if "mimo-v2.5-pro" in _model:
+            parsed["model"] = _model.replace("mimo-v2.5-pro", "mimo-v2.5")
+            log(f"[{req_id}] 模型降级: {_model} → {parsed['model']}")
+
         # 自动补充默认 system prompt
-        if parsed.get("model") == "mimo-v2.5-pro":
+        if parsed.get("model") == "mimo-v2.5":
             msgs = parsed.get("messages", [])
             if not any(m.get("role") == "system" for m in msgs):
                 parsed["messages"] = [{"role": "system", "content": "You are a personal assistant running inside OpenClaw."}] + msgs
@@ -343,7 +335,7 @@ async def handle_request(ws, req, client, lock):
             parsed["max_tokens"] = 131072
 
         body = json.dumps(parsed, ensure_ascii=False)
-        log(f"[{req_id}] 发送MIMO body={body[:300]}")
+        log(f"[{req_id}] 发送MIMO body_len={len(body)} url={BASE}/v1/chat/completions stream={parsed.get('stream',False)}")
 
         # 统一走 OpenAI 端点
         url = f"{BASE}/v1/chat/completions"
@@ -351,12 +343,14 @@ async def handle_request(ws, req, client, lock):
 
         is_stream = parsed.get("stream", False)
 
+        log(f"[{req_id}] 开始 HTTP 请求...")
         async with client.stream(
             method=req.get("method", "POST"),
             url=url,
             headers={**auth_hdr, "Content-Type": "application/json"},
             content=body,
         ) as r:
+            log(f"[{req_id}] 收到响应 status={r.status_code}")
             await safe_send(ws, lock, {
                 "req_id": req_id, "type": "start",
                 "status": r.status_code, "headers": dict(r.headers),
