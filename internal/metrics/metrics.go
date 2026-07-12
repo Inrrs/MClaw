@@ -103,7 +103,7 @@ func (m *Metrics) SetPrices(p PriceConfig) {
 }
 
 func (m *Metrics) getPrices() PriceConfig {
-	if p, ok := m.prices.Load().(*PriceConfig); ok && p != nil {
+	if p := m.prices.Load(); p != nil {
 		return *p
 	}
 	return DefaultPrices
