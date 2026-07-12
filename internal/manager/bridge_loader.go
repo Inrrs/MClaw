@@ -3,10 +3,10 @@ package manager
 import (
 	_ "embed"
 	"encoding/base64"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 //go:embed bridge_fallback.py
@@ -66,6 +66,7 @@ func PrepareBridgeCode(gatewayURL string) string {
 	code := LoadBridgeCode()
 	// 用 base64 编码网关地址，避免特殊字符问题
 	encoded := base64.StdEncoding.EncodeToString([]byte(gatewayURL))
-	code = fmt.Sprintf(code, encoded)
+	// 用 strings.Replace 替代 fmt.Sprintf，避免代码中 % 字符干扰
+	code = strings.Replace(code, "%s", encoded, 1)
 	return code
 }

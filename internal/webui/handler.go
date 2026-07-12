@@ -4,7 +4,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"io"
 	"log/slog"
 	"net/http"
@@ -33,8 +32,7 @@ func logRequest(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
-	t := template.Must(template.New("index").Parse(indexHTML))
-	if err := t.Execute(w, nil); err != nil {
+	if err := h.indexTmpl.Execute(w, nil); err != nil {
 		slog.Error("渲染首页失败", "error", err)
 	}
 }
@@ -233,6 +231,12 @@ func (h *Handler) handleDeleteBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// 限制批量删除数量
+	if len(req.UserIDs) > 50 {
+		writeJSON(w, map[string]any{"ok": false, "error": "最多批量删除 50 个账号"})
 		return
 	}
 

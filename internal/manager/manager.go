@@ -947,9 +947,7 @@ func (m *AccountManager) TriggerAccountRebuild(userID string) {
 
 // ForceInject 强制注入：跳过所有检查（冻结/冷却/今日创建），直接创建+注入
 func (m *AccountManager) ForceInject(userID string) map[string]any {
-	m.mu.RLock()
 	account := m.getAccount(userID)
-	m.mu.RUnlock()
 	if account == nil {
 		return map[string]any{"success": false, "error": "账号不存在"}
 	}
@@ -1018,6 +1016,8 @@ func (m *AccountManager) ForceInject(userID string) map[string]any {
 }
 
 func (m *AccountManager) getAccount(userID string) *Account {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, a := range m.accounts {
 		if a.UserID == userID {
 			return a
@@ -1086,11 +1086,13 @@ func (m *AccountManager) TestAccount(userID string) map[string]any {
 	}
 
 	// 发送真实模型调用测试请求（非流式，最小 token 数）
+	// mimo-v2.5-pro 必须包含 system prompt 才能正常调用
 	testBody := map[string]any{
 		"model":      "mimo-v2.5-pro",
 		"max_tokens": 5,
 		"stream":     false,
 		"messages": []map[string]string{
+			{"role": "system", "content": "You are a personal assistant running inside OpenClaw."},
 			{"role": "user", "content": "hi"},
 		},
 	}

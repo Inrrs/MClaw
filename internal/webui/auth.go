@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"html/template"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -13,18 +14,20 @@ import (
 )
 
 type Handler struct {
-	manager  *manager.AccountManager
-	proxyMgr *proxy.Manager
-	auth     *auth.Auth
-	pool     *gateway.NodePool
+	manager   *manager.AccountManager
+	proxyMgr  *proxy.Manager
+	auth      *auth.Auth
+	pool      *gateway.NodePool
+	indexTmpl *template.Template
 }
 
 func NewHandler(mgr *manager.AccountManager, proxyMgr *proxy.Manager, authMgr *auth.Auth, pool *gateway.NodePool) *Handler {
 	return &Handler{
-		manager:  mgr,
-		proxyMgr: proxyMgr,
-		auth:     authMgr,
-		pool:     pool,
+		manager:   mgr,
+		proxyMgr:  proxyMgr,
+		auth:      authMgr,
+		pool:      pool,
+		indexTmpl: template.Must(template.New("index").Parse(indexHTML)),
 	}
 }
 

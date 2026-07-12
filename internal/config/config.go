@@ -39,30 +39,31 @@ type Config struct {
 
 // ModelMappingPath 模型映射文件路径
 func (c *Config) ModelMappingPath() string {
-	return filepath.Join(c.dataDir(), "model_mapping.json")
+	return filepath.Join(c.GetDataDir(), "model_mapping.json")
 }
 
 // ManagerStatePath 管理器状态文件路径
 func (c *Config) ManagerStatePath() string {
-	return filepath.Join(c.dataDir(), "manager_state.json")
+	return filepath.Join(c.GetDataDir(), "manager_state.json")
 }
 
 // ModelsFile 模型列表缓存文件路径
 func (c *Config) ModelsFile() string {
-	return filepath.Join(c.dataDir(), "models.json")
+	return filepath.Join(c.GetDataDir(), "models.json")
 }
 
 // TodayCreatedPath 今日创建记录文件路径
 func (c *Config) TodayCreatedPath() string {
-	return filepath.Join(c.dataDir(), "today_created.json")
+	return filepath.Join(c.GetDataDir(), "today_created.json")
 }
 
 // DBPath SQLite 数据库文件路径
 func (c *Config) DBPath() string {
-	return filepath.Join(c.dataDir(), "mclaw.db")
+	return filepath.Join(c.GetDataDir(), "mclaw.db")
 }
 
-func (c *Config) dataDir() string {
+// GetDataDir 返回数据目录路径（默认 "data"）
+func (c *Config) GetDataDir() string {
 	if c.DataDir != "" {
 		return c.DataDir
 	}

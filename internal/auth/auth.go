@@ -206,6 +206,7 @@ func (a *Auth) cleanupSessions() {
 	for {
 		select {
 		case <-ticker.C:
+			// 清理过期 session
 			a.mu.Lock()
 			for sessionID, expiry := range a.sessions {
 				if time.Now().After(expiry) {
@@ -213,6 +214,14 @@ func (a *Auth) cleanupSessions() {
 				}
 			}
 			a.mu.Unlock()
+			// 清理过期 rate limiter 条目
+			a.rateMu.Lock()
+			for ip, entry := range a.rateLimiter {
+				if time.Since(entry.lastSeen) > 5*time.Minute {
+					delete(a.rateLimiter, ip)
+				}
+			}
+			a.rateMu.Unlock()
 		case <-a.stopCh:
 			return
 		}

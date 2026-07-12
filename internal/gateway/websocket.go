@@ -61,13 +61,15 @@ func (n *Node) GetCooldownRemaining() time.Duration {
 
 func HandleWebSocket(pool *NodePool, wsToken string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Token 认证（如果配置了 wsToken）
-		if wsToken != "" {
-			token := r.URL.Query().Get("token")
-			if token != wsToken {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		// Token 认证（必须配置 wsToken，否则拒绝连接）
+		if wsToken == "" {
+			http.Error(w, "WebSocket token not configured", http.StatusServiceUnavailable)
+			return
+		}
+		token := r.URL.Query().Get("token")
+		if token != wsToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)

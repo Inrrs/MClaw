@@ -138,6 +138,7 @@ func isStreamRequest(body []byte) bool {
 // normalizeBody 规范化请求体，确保 MIMO API 兼容
 // 1. 移除 stream_options（MIMO 不支持）
 // 2. 将 list[dict] 或 dict 格式的 content 转为纯字符串
+// 3. 移除 Anthropic 特有字段（context_management, output_config, metadata）
 func normalizeBody(body []byte) []byte {
 	var reqMap map[string]any
 	if err := json.Unmarshal(body, &reqMap); err != nil {
@@ -148,6 +149,13 @@ func normalizeBody(body []byte) []byte {
 	if _, exists := reqMap["stream_options"]; exists {
 		delete(reqMap, "stream_options")
 		changed = true
+	}
+	// 移除 Anthropic 特有字段（bridge 不需要）
+	for _, key := range []string{"context_management", "output_config", "metadata"} {
+		if _, exists := reqMap[key]; exists {
+			delete(reqMap, key)
+			changed = true
+		}
 	}
 	// 规范化 messages content
 	if msgs, ok := reqMap["messages"].([]any); ok {
