@@ -12,6 +12,7 @@ import (
 
 	"mclaw/internal/manager"
 	"mclaw/internal/metrics"
+	"mclaw/internal/proxy"
 )
 
 //go:embed static/index.html
@@ -131,6 +132,78 @@ func (h *Handler) handleProxyUpdate(w http.ResponseWriter, r *http.Request) {
 		h.proxyMgr.UpdateURL(req.PoolURL)
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (h *Handler) handleWhitelistGet(w http.ResponseWriter, r *http.Request) {
+	if h.proxyMgr == nil {
+		writeJSON(w, map[string]any{"configured": false})
+		return
+	}
+	writeJSON(w, h.proxyMgr.GetWhitelistStats())
+}
+
+func (h *Handler) handleWhitelistUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, _ := io.ReadAll(r.Body)
+	var req struct {
+		UID         string `json:"uid"`
+		Key         string `json:"key"`
+		URL         string `json:"url"`          // 完整 URL，自动解析 uid/key
+		WhitelistURL string `json:"whitelist_url"` // 白名单 API 基础 URL
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": "Invalid JSON"})
+		return
+	}
+	if h.proxyMgr == nil {
+		writeJSON(w, map[string]any{"ok": false, "error": "代理管理器未初始化"})
+		return
+	}
+	uid, key, whitelistURL := req.UID, req.Key, req.WhitelistURL
+	// 支持粘贴完整 URL 自动解析
+	if req.URL != "" {
+		parsedUID, parsedKey, parsedBase, err := proxy.ParseWhitelistURL(req.URL)
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		uid, key, whitelistURL = parsedUID, parsedKey, parsedBase
+	}
+	if uid == "" || key == "" {
+		writeJSON(w, map[string]any{"ok": false, "error": "uid 和 key 不能为空"})
+		return
+	}
+	h.proxyMgr.UpdateWhitelistConfig(uid, key, whitelistURL)
+	// 立即尝试同步白名单
+	if err := h.proxyMgr.EnsureWhitelist(); err != nil {
+		writeJSON(w, map[string]any{"ok": true, "warning": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (h *Handler) handleWhitelistParseURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, _ := io.ReadAll(r.Body)
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || req.URL == "" {
+		writeJSON(w, map[string]any{"ok": false, "error": "请提供 URL"})
+		return
+	}
+	uid, key, baseURL, err := proxy.ParseWhitelistURL(req.URL)
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "uid": uid, "key": key, "base_url": baseURL})
 }
 
 func (h *Handler) handleImport(w http.ResponseWriter, r *http.Request) {

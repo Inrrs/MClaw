@@ -54,6 +54,9 @@ func (h *Handler) RegisterRoutes(r *chi.Mux) {
 	r.Post("/api/proxy", h.auth.WebUIAuthMiddleware(h.handleProxyUpdate))
 	r.Post("/api/test_account", h.auth.WebUIAuthMiddleware(h.handleTestAccount))
 	r.Get("/api/error_logs", h.auth.WebUIAuthMiddleware(h.handleErrorLogs))
+	r.Get("/api/whitelist", h.auth.WebUIAuthMiddleware(h.handleWhitelistGet))
+	r.Post("/api/whitelist", h.auth.WebUIAuthMiddleware(h.handleWhitelistUpdate))
+	r.Post("/api/whitelist/parse_url", h.auth.WebUIAuthMiddleware(h.handleWhitelistParseURL))
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {

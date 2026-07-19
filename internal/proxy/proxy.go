@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +17,11 @@ type Pool struct {
 	URL      string `json:"url"`
 	Protocol string `json:"protocol"`
 	Interval int    `json:"interval"` // 刷新间隔（秒）
+
+	// IP 白名单配置（代理商要求添加出口 IP 白名单才能使用代理）
+	WhitelistUID  string `json:"whitelist_uid"`  // 代理商白名单 UID
+	WhitelistKey  string `json:"whitelist_key"`  // 代理商白名单 Key
+	WhitelistURL  string `json:"whitelist_url"`  // 白名单 API 基础 URL（默认 http://op.xiequ.cn）
 }
 
 // Stats 代理使用统计
@@ -61,6 +68,12 @@ func (m *Manager) Start() {
 		return
 	}
 	slog.Info("代理管理器启动", "url", m.pool.URL)
+
+	// 启动时先确保白名单包含当前 IP
+	if err := m.EnsureWhitelist(); err != nil {
+		slog.Warn("白名单初始化失败（继续启动）", "error", err)
+	}
+
 	m.refresh()
 
 	interval := m.pool.Interval
@@ -73,6 +86,10 @@ func (m *Manager) Start() {
 	for {
 		select {
 		case <-ticker.C:
+			// 每次刷新前检查白名单
+			if err := m.EnsureWhitelist(); err != nil {
+				slog.Warn("白名单检查失败", "error", err)
+			}
 			m.refresh()
 		case <-m.stopCh:
 			return
@@ -314,4 +331,233 @@ func (m *Manager) GetProxyCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.proxies)
+}
+
+// ─────────────────── IP 白名单管理 ───────────────────
+
+// WhitelistInfo 白名单条目
+type WhitelistInfo struct {
+	IP   string `json:"ip"`
+	Meno string `json:"meno"`
+}
+
+// GetPublicIP 获取当前服务器公网 IP
+func GetPublicIP() (string, error) {
+	for _, url := range []string{
+		"https://api.ipify.org",
+		"https://ifconfig.me/ip",
+		"https://icanhazip.com",
+	} {
+		resp, err := http.Get(url)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		ip := strings.TrimSpace(string(body))
+		if ip != "" && !strings.Contains(ip, "<") {
+			return ip, nil
+		}
+	}
+	return "", fmt.Errorf("无法获取公网 IP")
+}
+
+// whitelistBaseURL 获取白名单 API 基础 URL
+func (m *Manager) whitelistBaseURL() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.pool.WhitelistURL != "" {
+		return m.pool.WhitelistURL
+	}
+	return "http://op.xiequ.cn"
+}
+
+// whitelistParams 获取白名单认证参数
+func (m *Manager) whitelistParams() (uid, key string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.pool.WhitelistUID, m.pool.WhitelistKey
+}
+
+// IsWhitelistConfigured 检查白名单是否已配置
+func (m *Manager) IsWhitelistConfigured() bool {
+	uid, key := m.whitelistParams()
+	return uid != "" && key != ""
+}
+
+// GetWhitelist 获取当前白名单列表
+func (m *Manager) GetWhitelist() ([]WhitelistInfo, error) {
+	uid, key := m.whitelistParams()
+	if uid == "" || key == "" {
+		return nil, fmt.Errorf("白名单未配置")
+	}
+	base := m.whitelistBaseURL()
+	url := fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=getjson", base, uid, key)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("获取白名单失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	raw := strings.TrimSpace(string(body))
+	if raw == "" {
+		return []WhitelistInfo{}, nil
+	}
+	// 尝试 JSON 解析
+	var items []WhitelistInfo
+	if err := json.Unmarshal(body, &items); err == nil {
+		return items, nil
+	}
+	// fallback: 按行解析 text 格式
+	var result []WhitelistInfo
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.Contains(line, "error") && !strings.Contains(line, "Error") {
+			result = append(result, WhitelistInfo{IP: line})
+		}
+	}
+	return result, nil
+}
+
+// AddToWhitelist 添加 IP 到白名单
+func (m *Manager) AddToWhitelist(ip, meno string) error {
+	uid, key := m.whitelistParams()
+	if uid == "" || key == "" {
+		return fmt.Errorf("白名单未配置")
+	}
+	base := m.whitelistBaseURL()
+	url := fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=add&ip=%s&meno=%s", base, uid, key, url.QueryEscape(ip), url.QueryEscape(meno))
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("添加白名单失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	raw := strings.TrimSpace(string(body))
+	if strings.Contains(raw, "error") || strings.Contains(raw, "Error") {
+		return fmt.Errorf("添加白名单返回错误: %s", raw)
+	}
+	slog.Info("IP 白名单已添加", "ip", ip, "meno", meno, "response", raw)
+	return nil
+}
+
+// DeleteFromWhitelist 从白名单删除 IP
+func (m *Manager) DeleteFromWhitelist(ip string) error {
+	uid, key := m.whitelistParams()
+	if uid == "" || key == "" {
+		return fmt.Errorf("白名单未配置")
+	}
+	base := m.whitelistBaseURL()
+	var reqURL string
+	if ip == "all" {
+		reqURL = fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=del&ip=all", base, uid, key)
+	} else {
+		reqURL = fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=del&ip=%s", base, uid, key, url.QueryEscape(ip))
+	}
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		return fmt.Errorf("删除白名单失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	slog.Info("IP 白名单已删除", "ip", ip, "response", strings.TrimSpace(string(body)))
+	return nil
+}
+
+// EnsureWhitelist 确保当前公网 IP 在白名单中（不一致才更新）
+func (m *Manager) EnsureWhitelist() error {
+	if !m.IsWhitelistConfigured() {
+		return nil // 未配置白名单，跳过
+	}
+
+	publicIP, err := GetPublicIP()
+	if err != nil {
+		return fmt.Errorf("获取公网 IP 失败: %w", err)
+	}
+
+	whitelist, err := m.GetWhitelist()
+	if err != nil {
+		slog.Warn("获取白名单失败，尝试直接添加", "error", err)
+		return m.AddToWhitelist(publicIP, "mclaw-auto")
+	}
+
+	// 检查当前 IP 是否已在白名单中
+	for _, item := range whitelist {
+		if item.IP == publicIP {
+			slog.Debug("公网 IP 已在白名单中", "ip", publicIP)
+			return nil
+		}
+	}
+
+	// 不一致：删除旧的，添加新的
+	if len(whitelist) > 0 {
+		slog.Info("白名单 IP 不一致，更新中", "public_ip", publicIP, "old_whitelist", len(whitelist))
+		for _, item := range whitelist {
+			m.DeleteFromWhitelist(item.IP)
+		}
+	} else {
+		slog.Info("白名单为空，添加当前 IP", "ip", publicIP)
+	}
+
+	return m.AddToWhitelist(publicIP, "mclaw-auto")
+}
+
+// UpdateWhitelistConfig 更新白名单配置（WebUI 调用）
+func (m *Manager) UpdateWhitelistConfig(uid, key, whitelistURL string) {
+	m.mu.Lock()
+	m.pool.WhitelistUID = uid
+	m.pool.WhitelistKey = key
+	if whitelistURL != "" {
+		m.pool.WhitelistURL = whitelistURL
+	}
+	m.mu.Unlock()
+	slog.Info("白名单配置已更新", "uid", uid, "url", m.pool.WhitelistURL)
+}
+
+// ParseWhitelistURL 从完整 URL 解析 uid 和 key
+// 支持格式: http://op.xiequ.cn/IpWhiteList.aspx?uid=148379&ukey=47941D7F917D0E229BB53C1B3ECC6F28&act=get
+func ParseWhitelistURL(rawURL string) (uid, key, baseURL string, err error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", "", fmt.Errorf("URL 解析失败: %w", err)
+	}
+	uid = u.Query().Get("uid")
+	ukey := u.Query().Get("ukey")
+	if uid == "" || ukey == "" {
+		return "", "", "", fmt.Errorf("URL 中缺少 uid 或 ukey 参数")
+	}
+	// 提取基础 URL（去掉路径和参数）
+	baseURL = u.Scheme + "://" + u.Host
+	return uid, ukey, baseURL, nil
+}
+
+// GetWhitelistStats 获取白名单状态（供 WebUI 展示）
+func (m *Manager) GetWhitelistStats() map[string]any {
+	result := map[string]any{
+		"configured": m.IsWhitelistConfigured(),
+	}
+	if !m.IsWhitelistConfigured() {
+		return result
+	}
+	publicIP, err := GetPublicIP()
+	if err == nil {
+		result["public_ip"] = publicIP
+	}
+	whitelist, err := m.GetWhitelist()
+	if err == nil {
+		result["whitelist"] = whitelist
+		result["count"] = len(whitelist)
+		// 检查当前 IP 是否在白名单中
+		if publicIP != "" {
+			matched := false
+			for _, item := range whitelist {
+				if item.IP == publicIP {
+					matched = true
+					break
+				}
+			}
+			result["ip_in_whitelist"] = matched
+		}
+	}
+	return result
 }

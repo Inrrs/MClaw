@@ -65,9 +65,12 @@ func main() {
 	authMgr := auth.New(cfg.Auth.APIKey, cfg.Auth.WebUIUser, cfg.Auth.WebUIPass, "")
 
 	proxyMgr := proxy.NewManager(proxy.Pool{
-		URL:      cfg.Proxy.PoolURL,
-		Protocol: cfg.Proxy.Protocol,
-		Interval: cfg.Proxy.Interval,
+		URL:           cfg.Proxy.PoolURL,
+		Protocol:      cfg.Proxy.Protocol,
+		Interval:      cfg.Proxy.Interval,
+		WhitelistUID:  cfg.Proxy.WhitelistUID,
+		WhitelistKey:  cfg.Proxy.WhitelistKey,
+		WhitelistURL:  cfg.Proxy.WhitelistURL,
 	}, func(newURL string) {
 		cfg.Proxy.PoolURL = newURL
 		if err := cfg.Save(*configPath); err != nil {

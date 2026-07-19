@@ -24,9 +24,12 @@ type Config struct {
 	} `json:"auth"`
 
 	Proxy struct {
-		PoolURL  string `json:"pool_url"`
-		Protocol string `json:"protocol"`
-		Interval int    `json:"interval"`
+		PoolURL       string `json:"pool_url"`
+		Protocol      string `json:"protocol"`
+		Interval      int    `json:"interval"`
+		WhitelistUID  string `json:"whitelist_uid"`  // 代理白名单 UID
+		WhitelistKey  string `json:"whitelist_key"`  // 代理白名单 Key
+		WhitelistURL  string `json:"whitelist_url"`  // 白名单 API 基础 URL（默认 op.xiequ.cn）
 	} `json:"proxy"`
 
 	Manager struct {
