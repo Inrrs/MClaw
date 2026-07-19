@@ -71,7 +71,7 @@ Client (OpenAI/Anthropic 格式)
 
 - **AccountManager** (`internal/manager/manager.go`)：30s 调度循环检查容器状态，剩余 ≤300s 时提前轮换
 - **Bridge 注入** (`internal/manager/inject.go`)：通过 MIMO WebSocket 执行多步注入（reset → 检查/清除 soul → 注入 Python bridge），依赖关键词检测判断 AI 响应
-- **Bridge Skill 加载** (`internal/manager/bridge_loader.go`)：bridge 脚本支持从外部文件加载（优先级：`MCLAW_BRIDGE_SCRIPT` 环境变量 > `scripts/bridge.py` > go:embed 内置 fallback），无需重编译即可更新 bridge 逻辑
+- **Bridge Skill 加载** (`internal/manager/bridge_loader.go`)：bridge 脚本支持从外部文件加载（优先级：`MCLAW_BRIDGE_SCRIPT` 环境变量 > `~/.openclaw/skills/mclaw-bridge/bridge.py` > go:embed 内置 fallback），无需重编译即可更新 bridge 逻辑
 - **PendingRequest** (`internal/gateway/websocket.go`)：`sync.Map` + 带缓冲 channel（容量 100）追踪进行中请求，`atomic.Bool` 保证安全完成信号
 - **NodePool 错误冷却**：401/403 冷却 15 分钟，429 冷却 60 秒
 - **风控/1011 冻结**：被风控(code=200)、凭证失效(401/403)、容器内部错误(1011)的账号冻结 24 小时（`FrozenUntil`），持久化到 `manager_state.json`
@@ -102,5 +102,3 @@ Client (OpenAI/Anthropic 格式)
 - 测试文件位于 `internal/api/`、`internal/config/`、`internal/manager/`
 - WebSocket 消息类型白名单校验：`start`、`chunk`、`finish`、`error`、`models`
 - Bridge 脚本通过 `go:embed` 内置为 fallback，也支持外部加载（见 `bridge_loader.go`），更新 bridge 逻辑无需重编译 Go
-- 外部 bridge 仓库：[Inrrs/MClaw-skill](https://github.com/Inrrs/MClaw-skill)，本地副本在 `scripts/bridge.py`
-- 详细开发文档见 `PROJECT_DOC.md`（1267 行，涵盖 19 个章节）

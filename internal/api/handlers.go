@@ -135,6 +135,330 @@ func isStreamRequest(body []byte) bool {
 	return req.Stream != nil && *req.Stream
 }
 
+// convertAnthropicToOpenAI 将 Anthropic Messages 格式转换为 OpenAI Chat Completions 格式
+// bridge 只处理 OpenAI，Anthropic 转换由网关侧完成
+func convertAnthropicToOpenAI(body []byte) []byte {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+
+	result := make(map[string]any)
+
+	// model
+	if model, ok := req["model"].(string); ok {
+		result["model"] = model
+	}
+	// stream
+	if stream, ok := req["stream"].(bool); ok {
+		result["stream"] = stream
+	}
+	// max_tokens: 截断到 MIMO 限制
+	if mt, ok := req["max_tokens"].(float64); ok && mt >= 100 {
+		if mt > 16384 {
+			mt = 16384
+		}
+		result["max_tokens"] = int(mt)
+	} else {
+		result["max_tokens"] = 4096
+	}
+
+	// messages: Anthropic system 字段 → system message，content 数组 → 纯文本
+	msgs := make([]map[string]any, 0)
+	if sys, ok := req["system"]; ok && sys != nil {
+		sysText := ""
+		switch s := sys.(type) {
+		case string:
+			sysText = s
+		case []any:
+			parts := make([]string, 0)
+			for _, b := range s {
+				if block, ok := b.(map[string]any); ok {
+					if t, ok := block["text"].(string); ok {
+						parts = append(parts, t)
+					}
+				}
+			}
+			sysText = strings.Join(parts, " ")
+		}
+		if sysText != "" {
+			msgs = append(msgs, map[string]any{"role": "system", "content": sysText})
+		}
+	}
+
+	if messages, ok := req["messages"].([]any); ok {
+		for _, m := range messages {
+			msg, ok := m.(map[string]any)
+			if !ok {
+				continue
+			}
+			role, _ := msg["role"].(string)
+			content := msg["content"]
+
+			switch c := content.(type) {
+			case string:
+				msgs = append(msgs, map[string]any{"role": role, "content": c})
+			case []any:
+				// 检查是否有 tool_use / tool_result
+				hasToolUse := false
+				hasToolResult := false
+				for _, b := range c {
+					if block, ok := b.(map[string]any); ok {
+						switch block["type"] {
+						case "tool_use":
+							hasToolUse = true
+						case "tool_result":
+							hasToolResult = true
+						}
+					}
+				}
+
+				if hasToolResult {
+					// tool_result → OpenAI tool message
+					for _, b := range c {
+						if block, ok := b.(map[string]any); ok && block["type"] == "tool_result" {
+							rc := ""
+							switch r := block["content"].(type) {
+							case string:
+								rc = r
+							case []any:
+								parts := make([]string, 0)
+								for _, rb := range r {
+									if rbMap, ok := rb.(map[string]any); ok {
+										if t, ok := rbMap["text"].(string); ok {
+											parts = append(parts, t)
+										}
+									}
+								}
+								rc = strings.Join(parts, "\n")
+							}
+							toolCallID, _ := block["tool_use_id"].(string)
+							msgs = append(msgs, map[string]any{"role": "tool", "tool_call_id": toolCallID, "content": rc})
+						}
+					}
+				} else if hasToolUse {
+					// tool_use → OpenAI assistant with tool_calls
+					textParts := make([]string, 0)
+					toolCalls := make([]map[string]any, 0)
+					for _, b := range c {
+						if block, ok := b.(map[string]any); ok {
+							switch block["type"] {
+							case "text":
+								if t, ok := block["text"].(string); ok {
+									textParts = append(textParts, t)
+								}
+							case "tool_use":
+								inputJSON, _ := json.Marshal(block["input"])
+								toolCalls = append(toolCalls, map[string]any{
+									"id":   block["id"],
+									"type": "function",
+									"function": map[string]any{
+										"name":      block["name"],
+										"arguments": string(inputJSON),
+									},
+								})
+							}
+						}
+					}
+					oaiMsg := map[string]any{"role": "assistant"}
+					if len(textParts) > 0 {
+						oaiMsg["content"] = strings.Join(textParts, "\n")
+					}
+					if len(toolCalls) > 0 {
+						oaiMsg["tool_calls"] = toolCalls
+					}
+					msgs = append(msgs, oaiMsg)
+				} else {
+					// 纯文本块 → 拼接
+					parts := make([]string, 0)
+					for _, b := range c {
+						if block, ok := b.(map[string]any); ok {
+							if block["type"] == "text" {
+								if t, ok := block["text"].(string); ok {
+									parts = append(parts, t)
+								}
+							}
+						}
+					}
+					msgs = append(msgs, map[string]any{"role": role, "content": strings.Join(parts, "\n")})
+				}
+			default:
+				msgs = append(msgs, map[string]any{"role": role, "content": fmt.Sprintf("%v", c)})
+			}
+		}
+	}
+	result["messages"] = msgs
+
+	// tools: Anthropic input_schema → OpenAI parameters
+	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
+		oaiTools := make([]map[string]any, 0, len(tools))
+		for _, t := range tools {
+			tool, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			if tool["type"] == "function" {
+				oaiTools = append(oaiTools, tool)
+				continue
+			}
+			// Anthropic format
+			fn := map[string]any{
+				"name":        tool["name"],
+				"description": tool["description"],
+			}
+			if schema, ok := tool["input_schema"]; ok {
+				fn["parameters"] = schema
+			}
+			oaiTools = append(oaiTools, map[string]any{"type": "function", "function": fn})
+		}
+		if len(oaiTools) > 0 {
+			result["tools"] = oaiTools
+		}
+	}
+
+	// tool_choice: Anthropic → OpenAI
+	if tc, ok := req["tool_choice"]; ok {
+		switch v := tc.(type) {
+		case map[string]any:
+			switch v["type"] {
+			case "auto":
+				result["tool_choice"] = "auto"
+			case "any":
+				result["tool_choice"] = "required"
+			case "tool":
+				if name, ok := v["name"].(string); ok {
+					result["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": name}}
+				}
+			}
+		case string:
+			result["tool_choice"] = v
+		}
+	}
+
+	out, err := json.Marshal(result)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// capMaxTokens 截断 max_tokens 到指定上限（不修改其他字段）
+func capMaxTokens(body []byte, limit int) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	if mt, ok := m["max_tokens"].(float64); ok && mt > float64(limit) {
+		m["max_tokens"] = limit
+		out, err := json.Marshal(m)
+		if err != nil {
+			return body
+		}
+		return out
+	}
+	return body
+}
+
+// hasAnthropicContent 检测请求体是否含 Anthropic 格式内容（tool_use/tool_result 块）
+func hasAnthropicContent(body []byte) bool {
+	var reqMap map[string]any
+	if err := json.Unmarshal(body, &reqMap); err != nil {
+		return false
+	}
+	msgs, ok := reqMap["messages"].([]any)
+	if !ok {
+		return false
+	}
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, p := range content {
+			if part, ok := p.(map[string]any); ok {
+				t, _ := part["type"].(string)
+				if t == "tool_use" || t == "tool_result" {
+					return true
+				}
+			}
+		}
+	}
+	// 也检查 Anthropic 顶层 system 字段
+	if _, ok := reqMap["system"]; ok {
+		return true
+	}
+	return false
+}
+
+// flattenContent 将 messages 中的 content 数组转为纯字符串
+// 只处理纯文本列表，保留多模态（图片等）原样
+// 不修改其他字段（model、stream、tools 等）
+func flattenContent(body []byte) []byte {
+	var reqMap map[string]any
+	if err := json.Unmarshal(body, &reqMap); err != nil {
+		return body
+	}
+	msgs, ok := reqMap["messages"].([]any)
+	if !ok {
+		return body
+	}
+	changed := false
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := msg["content"]
+		if !ok {
+			continue
+		}
+		c, ok := content.([]any)
+		if !ok {
+			continue
+		}
+		// 检查是否纯文本列表
+		hasNonText := false
+		for _, p := range c {
+			if part, ok := p.(map[string]any); ok {
+				if part["type"] != "text" {
+					hasNonText = true
+					break
+				}
+			}
+		}
+		if hasNonText {
+			continue // 保留多模态原样
+		}
+		// 纯文本列表 → 拼接为字符串
+		var texts []string
+		for _, p := range c {
+			if part, ok := p.(map[string]any); ok {
+				if part["type"] == "text" {
+					if t, ok := part["text"].(string); ok {
+						texts = append(texts, t)
+					}
+				}
+			} else if s, ok := p.(string); ok {
+				texts = append(texts, s)
+			}
+		}
+		msg["content"] = strings.Join(texts, "\n")
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(reqMap)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // normalizeBody 规范化请求体，确保 MIMO API 兼容
 // 1. 移除 stream_options（MIMO 不支持）
 // 2. 将 list[dict] 或 dict 格式的 content 转为纯字符串
@@ -148,6 +472,11 @@ func normalizeBody(body []byte) []byte {
 	// 移除 stream_options
 	if _, exists := reqMap["stream_options"]; exists {
 		delete(reqMap, "stream_options")
+		changed = true
+	}
+	// 截断 max_tokens（MIMO 限制）
+	if mt, ok := reqMap["max_tokens"].(float64); ok && mt > 16384 {
+		reqMap["max_tokens"] = 16384
 		changed = true
 	}
 	// 移除 Anthropic 特有字段（bridge 不需要）
@@ -347,7 +676,6 @@ func extractErrorMessage(body json.RawMessage) string {
 	return string(body)
 }
 
-// handleProxyRequest 通用代理请求处理（模型映射 + 发送 + 流式/非流式分发）
 // prepareRequest 预处理请求体：模型映射 + 图片降级 + 格式规范化
 func prepareRequest(body []byte, applyMapping bool) []byte {
 	if applyMapping {
@@ -370,8 +698,14 @@ func prepareRequest(body []byte, applyMapping bool) []byte {
 	return normalizeBody(body)
 }
 
-func handleProxyRequest(ctx context.Context, pool *gateway.NodePool, path string, applyMapping bool, w http.ResponseWriter, body []byte) {
-	body = prepareRequest(body, applyMapping)
+// handleProxyRequest 通用代理请求处理（模型映射 + 发送 + 流式/非流式分发）
+// skipNormalize 为 true 时跳过 prepareRequest（已转换的 Anthropic 请求不需要二次处理）
+func handleProxyRequest(ctx context.Context, pool *gateway.NodePool, path string, skipNormalize bool, w http.ResponseWriter, body []byte) {
+	if !skipNormalize {
+		body = prepareRequest(body, true)
+	}
+	// 调试：记录发给 bridge 的请求体（截断）
+	slog.Warn("bridge 请求", "path", path, "skipNormalize", skipNormalize, "body", truncate(string(body), 2000))
 
 	pending, node, err := sendToAvailableNode(pool, "POST", path, body)
 	if err != nil {
@@ -396,6 +730,23 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
+		// 模型映射
+		model := getRequestModel(body)
+		if model != "" {
+			mapped := ApplyModelMapping(model)
+			if mapped != model {
+				body = replaceModel(body, mapped)
+			}
+		}
+		// 截断 max_tokens
+		body = capMaxTokens(body, 16384)
+		// 检测是否含 Anthropic 格式内容（tool_use/tool_result 块）
+		if hasAnthropicContent(body) {
+			body = convertAnthropicToOpenAI(body)
+			body = capMaxTokens(body, 16384)
+		} else {
+			body = flattenContent(body)
+		}
 		handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, w, body)
 	}
 }
@@ -408,11 +759,12 @@ func HandleResponses(pool *gateway.NodePool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		handleProxyRequest(r.Context(), pool, "/v1/responses", false, w, body)
+		handleProxyRequest(r.Context(), pool, "/v1/responses", true, w, body)
 	}
 }
 
 // HandleMessages Anthropic Messages API
+// 网关侧做 Anthropic → OpenAI 请求转换 + OpenAI → Anthropic 响应转换
 func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := readBody(r)
@@ -420,9 +772,154 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		// 保留原始路径，让 bridge 区分 OpenAI/Anthropic 格式
-		handleProxyRequest(r.Context(), pool, r.URL.Path, false, w, body)
+		isAnthropic := strings.Contains(r.URL.Path, "/anthropic/")
+		if isAnthropic {
+			converted := convertAnthropicToOpenAI(body)
+			converted = capMaxTokens(converted, 16384)
+			slog.Debug("Anthropic→OpenAI 转换", "before", len(body), "after", len(converted))
+			// 用包装 writer 拦截响应，转换回 Anthropic 格式
+			rw := &anthropicResponseWriter{ResponseWriter: w}
+			// Anthropic 已转换为 OpenAI，跳过 normalizeBody（避免二次处理）
+			handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, converted)
+			rw.flush()
+		} else {
+			handleProxyRequest(r.Context(), pool, "/v1/chat/completions", false, w, body)
+		}
 	}
+}
+
+// anthropicResponseWriter 包装 ResponseWriter，拦截写入做 OpenAI → Anthropic 转换
+type anthropicResponseWriter struct {
+	http.ResponseWriter
+	wrote    bool
+	buf      []byte
+}
+
+func (w *anthropicResponseWriter) Write(b []byte) (int, error) {
+	w.buf = append(w.buf, b...)
+	return len(b), nil
+}
+
+func (w *anthropicResponseWriter) flush() {
+	if len(w.buf) == 0 {
+		return
+	}
+	converted := convertOpenAIToAnthropic(w.buf)
+	w.ResponseWriter.Header().Set("Content-Type", "application/json")
+	w.ResponseWriter.Write(converted)
+}
+
+// convertOpenAIToAnthropic 将 OpenAI Chat Completion 响应转换为 Anthropic Messages 格式
+func convertOpenAIToAnthropic(body []byte) []byte {
+	var oai map[string]any
+	if err := json.Unmarshal(body, &oai); err != nil {
+		return body
+	}
+
+	choices, ok := oai["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		return body
+	}
+	choice, ok := choices[0].(map[string]any)
+	if !ok {
+		return body
+	}
+	msg, ok := choice["message"].(map[string]any)
+	if !ok {
+		return body
+	}
+
+	blocks := make([]map[string]any, 0)
+
+	// reasoning_content → thinking block
+	if rt, ok := msg["reasoning_content"].(string); ok && rt != "" {
+		blocks = append(blocks, map[string]any{"type": "thinking", "thinking": rt})
+	}
+
+	// tool_calls → tool_use blocks
+	if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 {
+		for _, tc := range tcs {
+			tcMap, ok := tc.(map[string]any)
+			if !ok {
+				continue
+			}
+			fn, _ := tcMap["function"].(map[string]any)
+			if fn == nil {
+				continue
+			}
+			var inp any
+			argsStr, _ := fn["arguments"].(string)
+			if err := json.Unmarshal([]byte(argsStr), &inp); err != nil {
+				inp = map[string]any{"raw": argsStr}
+			}
+			blocks = append(blocks, map[string]any{
+				"type":  "tool_use",
+				"id":    tcMap["id"],
+				"name":  fn["name"],
+				"input": inp,
+			})
+		}
+	} else if content, ok := msg["content"].(string); ok && content != "" {
+		blocks = append(blocks, map[string]any{"type": "text", "text": content})
+	} else {
+		blocks = append(blocks, map[string]any{"type": "text", "text": ""})
+	}
+
+	// finish_reason → stop_reason
+	sr := "end_turn"
+	if fr, ok := choice["finish_reason"].(string); ok {
+		switch fr {
+		case "tool_calls":
+			sr = "tool_use"
+		case "length":
+			sr = "max_tokens"
+		case "stop":
+			sr = "end_turn"
+		default:
+			sr = fr
+		}
+	}
+
+	model, _ := oai["model"].(string)
+	if model == "" {
+		model = "mimo-v2.5-pro"
+	}
+
+	usage, _ := oai["usage"].(map[string]any)
+	inputTokens := 0
+	outputTokens := 0
+	if usage != nil {
+		if v, ok := usage["prompt_tokens"].(float64); ok {
+			inputTokens = int(v)
+		}
+		if v, ok := usage["completion_tokens"].(float64); ok {
+			outputTokens = int(v)
+		}
+	}
+
+	result := map[string]any{
+		"id":            fmt.Sprintf("msg_%s", generateShortID()),
+		"type":          "message",
+		"role":          "assistant",
+		"content":       blocks,
+		"model":         model,
+		"stop_reason":   sr,
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+		},
+	}
+
+	out, err := json.Marshal(result)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func generateShortID() string {
+	return fmt.Sprintf("%x", time.Now().UnixNano())[:16]
 }
 
 // HandleModels 模型列表
@@ -545,9 +1042,18 @@ func handleStreamResponse(ctx context.Context, w http.ResponseWriter, pending *g
 					slog.Warn("上游返回非200状态码", "status", msg.Status, "node", node.ID)
 				}
 			case "chunk":
-				// 累积 chunk 用于提取 usage（最多保留 20 个）
 				if msg.Body != nil {
 					body := unwrapJSON(msg.Body)
+					// 首个 chunk 记录错误详情
+					if len(chunkBuffer) == 0 {
+						var errCheck map[string]any
+						if json.Unmarshal(body, &errCheck) == nil {
+							if e, ok := errCheck["error"]; ok {
+								errJSON, _ := json.Marshal(e)
+								slog.Warn("上游错误详情", "body", string(errJSON))
+							}
+						}
+					}
 					chunkBuffer = append(chunkBuffer, body)
 					if len(chunkBuffer) > 20 {
 						chunkBuffer = chunkBuffer[len(chunkBuffer)-20:]

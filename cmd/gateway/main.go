@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,6 +43,18 @@ func main() {
 		os.Exit(1)
 	}
 	defer log.Close()
+
+	// external_url 校验（bridge 注入核心依赖，未配置则无法工作）
+	if cfg.Gateway.ExternalURL == "" {
+		slog.Error("gateway.external_url 未配置！bridge 无法回连网关，请在 config.json 或 GATEWAY_EXTERNAL_URL 环境变量中设置")
+		os.Exit(1)
+	}
+	lowerURL := strings.ToLower(cfg.Gateway.ExternalURL)
+	if !strings.HasPrefix(lowerURL, "ws://") && !strings.HasPrefix(lowerURL, "wss://") {
+		slog.Error("gateway.external_url 必须以 ws:// 或 wss:// 开头", "url", cfg.Gateway.ExternalURL)
+		os.Exit(1)
+	}
+	slog.Info("gateway.external_url 校验通过", "url", cfg.Gateway.ExternalURL)
 
 	go logger.CleanupOldLogs(*logDir, 7)
 
@@ -78,7 +91,28 @@ func main() {
 	manager.SetTodayCreatedPath(cfg.TodayCreatedPath())
 	manager.LoadTodayCreated()
 
-	accountMgr := manager.NewAccountManager(nodePool, proxyMgr, cfg.Gateway.ExternalURL, cfg.Gateway.BaseURL, cfg.Auth.APIKey)
+	// 计算 bridge 代码 HTTP 下载地址
+	bridgeHTTPURL := strings.Replace(cfg.Gateway.ExternalURL, "wss://", "https://", 1)
+	bridgeHTTPURL = strings.Replace(bridgeHTTPURL, "ws://", "http://", 1)
+	if idx := strings.Index(bridgeHTTPURL, "://"); idx >= 0 {
+		rest := bridgeHTTPURL[idx+3:]
+		if i := strings.IndexAny(rest, "/?"); i >= 0 {
+			bridgeHTTPURL = bridgeHTTPURL[:idx+3+i]
+		}
+	}
+	if cfg.Server.Port != "443" && cfg.Server.Port != "80" {
+		hostPart := bridgeHTTPURL
+		if idx := strings.Index(hostPart, "://"); idx >= 0 {
+			hostPart = hostPart[idx+3:]
+		}
+		if !strings.Contains(hostPart, ":") {
+			bridgeHTTPURL += ":" + cfg.Server.Port
+		}
+	}
+	bridgeCodeURL := bridgeHTTPURL + "/api/bridge_code"
+	slog.Info("bridge 下载地址", "url", bridgeCodeURL)
+
+	accountMgr := manager.NewAccountManager(nodePool, proxyMgr, cfg.Gateway.ExternalURL, cfg.Gateway.BaseURL, cfg.Auth.APIKey, bridgeCodeURL)
 
 	nodePool.SetOnNodeDown(func(nodeID string) {
 		slog.Info("节点下线，等待 bridge 自动重连", "node", nodeID)
@@ -145,6 +179,13 @@ func main() {
 	// 只读状态端点（公开）
 	r.Get("/api/nodes", api.HandleNodesStatus(nodePool))
 	r.Get("/api/models", api.HandleAvailableModels(nodePool))
+
+	// bridge 代码下载端点（注入时 AI 通过 curl 下载，避免 WS 消息过大 1009）
+	r.Get("/api/bridge_code", func(w http.ResponseWriter, r *http.Request) {
+		code := manager.PrepareBridgeCode(cfg.Gateway.ExternalURL + "/ws")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(code))
+	})
 
 	// WebUI
 	webuiHandler := webui.NewHandler(accountMgr, proxyMgr, authMgr, nodePool)

@@ -60,6 +60,7 @@ type AccountManager struct {
 	gatewayURL string
 	baseURL    string
 	apiKey     string
+	bridgeURL  string // bridge 代码 HTTP 下载地址
 	accounts   []*Account
 	statuses   map[string]*AccountStatus
 	mu         sync.RWMutex
@@ -75,7 +76,7 @@ type AccountManager struct {
 	cachedStatus atomic.Pointer[[]AccountStatus]
 }
 
-func NewAccountManager(pool *gateway.NodePool, proxyMgr *proxy.Manager, gatewayURL, baseURL, apiKey string) *AccountManager {
+func NewAccountManager(pool *gateway.NodePool, proxyMgr *proxy.Manager, gatewayURL, baseURL, apiKey, bridgeURL string) *AccountManager {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
@@ -83,6 +84,7 @@ func NewAccountManager(pool *gateway.NodePool, proxyMgr *proxy.Manager, gatewayU
 		pool:       pool,
 		proxyMgr:   proxyMgr,
 		gatewayURL: gatewayURL,
+		bridgeURL:  bridgeURL,
 		baseURL:    baseURL,
 		apiKey:     apiKey,
 		statuses:   make(map[string]*AccountStatus),
@@ -194,14 +196,24 @@ func (m *AccountManager) tryReuseOrConnect() {
 func (m *AccountManager) waitForBridgeReconnect(userID string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	interval := 3 * time.Second
+	start := time.Now()
+	lastLog := time.Time{}
 	for time.Now().Before(deadline) {
 		select {
 		case <-m.stopCh:
 			return false
 		case <-time.After(interval):
 		}
-		if m.pool.GetAvailableCount() > 0 {
+		count := m.pool.GetAvailableCount()
+		if count > 0 {
+			LogAccountInfo(userID, "检测到可用节点: %d", count)
 			return true
+		}
+		// 每 30 秒打一次进度日志，避免「卡死」错觉
+		if time.Since(lastLog) >= 30*time.Second {
+			LogAccountInfo(userID, "等待节点上线中... 已等待 %ds / 超时 %ds",
+				int(time.Since(start).Seconds()), int(timeout.Seconds()))
+			lastLog = time.Now()
 		}
 	}
 	return false
@@ -410,11 +422,15 @@ func (m *AccountManager) doCreateAndConnect() {
 		statusInfo := m.statuses[account.UserID]
 		inCooldown := false
 		if statusInfo != nil {
+			// 风控冻结检查
 			if !statusInfo.FrozenUntil.IsZero() && time.Now().Before(statusInfo.FrozenUntil) {
 				inCooldown = true
 				LogAccountInfo(account.UserID, "风控冻结中，解冻时间: %s", statusInfo.FrozenUntil.Format("2006-01-02 15:04"))
 			} else if !statusInfo.LastFailTime.IsZero() && time.Since(statusInfo.LastFailTime) < 4*time.Hour {
+				// FrozenUntil 已过期但 LastFailTime 在 4 小时内 → 保持冷却
 				inCooldown = true
+				remain := int(4*time.Hour.Seconds() - time.Since(statusInfo.LastFailTime).Seconds())
+				LogAccountInfo(account.UserID, "4小时冷却中，剩余 %d 秒", remain)
 			}
 		}
 		m.mu.RUnlock()
@@ -451,6 +467,17 @@ func (m *AccountManager) doCreateAndConnect() {
 		LogAccountInfo(account.UserID, "容器状态: %s, 剩余: %d秒", status, remainSec)
 
 		if status == "AVAILABLE" && remainSec > 300 {
+			// 容器可用，清除失败冷却标记
+			m.mu.Lock()
+			m.statuses[account.UserID].LastFailTime = time.Time{}
+			m.mu.Unlock()
+
+			// 注入进行中，跳过（防止并发注入干扰）
+			if atomic.LoadInt32(&m.injecting) == 1 {
+				LogAccountInfo(account.UserID, "注入进行中，跳过本次检查")
+				return
+			}
+
 			// 快速路径：bridge 已在线且非强制重连时跳过注入
 			if m.pool.GetAvailableCount() > 0 && atomic.CompareAndSwapInt32(&m.forceReconnect, 0, 0) {
 				LogAccountInfo(account.UserID, "bridge 节点已在线，跳过注入")
@@ -499,6 +526,12 @@ func (m *AccountManager) doCreateAndConnect() {
 			continue
 		}
 
+		// 容器正在创建中，等待完成而非重复创建
+		if status == "CREATING" {
+			LogAccountInfo(account.UserID, "容器正在创建中，等待完成")
+			continue
+		}
+
 		if status == "NOT_CREATED" || status == "CREATE_FAILED" || status == "DESTROYED" || remainSec <= 0 {
 			LogAccountInfo(account.UserID, "尝试创建容器")
 			m.tryCreateForAccount(account)
@@ -532,6 +565,33 @@ func (m *AccountManager) tryCreateForAccount(account *Account) {
 	slog.Info("容器状态", "userId", account.UserID, "status", status, "剩余", remainSec)
 	LogAccountInfo(account.UserID, "容器状态: %s, 剩余: %d秒", status, remainSec)
 
+	// 容器正在创建中，等待完成而非重复创建
+	if status == "CREATING" {
+		LogAccountInfo(account.UserID, "容器正在创建中，等待完成")
+		// 等待容器就绪（最多等待 2 分钟）
+		for waitCount := 0; waitCount < 12; waitCount++ {
+			time.Sleep(10 * time.Second)
+			LogAccountInfo(account.UserID, "等待容器就绪... (%d/12)", waitCount+1)
+			status, remainSec, err = m.getContainerStatus(account)
+			if err != nil {
+				LogAccountError(account.UserID, "检查状态失败: %v", err)
+				continue
+			}
+			if status == "AVAILABLE" {
+				LogAccountInfo(account.UserID, "容器就绪: %s, 剩余: %d秒", status, remainSec)
+				break
+			}
+			if status != "CREATING" {
+				LogAccountError(account.UserID, "容器状态异常: %s", status)
+				return
+			}
+		}
+		if status != "AVAILABLE" {
+			LogAccountError(account.UserID, "容器未就绪: %s", status)
+			return
+		}
+	}
+
 	if status == "NOT_CREATED" || status == "DESTROYED" || status == "CREATE_FAILED" || remainSec <= 0 {
 		ClearTodayCreated(account.UserID)
 
@@ -544,6 +604,11 @@ func (m *AccountManager) tryCreateForAccount(account *Account) {
 			LogAccountWarn(account.UserID, "创建失败，进入冷却")
 			return
 		}
+
+		// 创建成功，清除失败冷却标记
+		m.mu.Lock()
+		m.statuses[account.UserID].LastFailTime = time.Time{}
+		m.mu.Unlock()
 
 		MarkTodayCreated(account.UserID)
 		LogAccountInfo(account.UserID, "容器创建成功，等待就绪...")
@@ -663,53 +728,68 @@ func (m *AccountManager) createContainer(account *Account) bool {
 	}
 
 	createURL := m.baseURL + "/open-apis/user/mimo-claw/create?xiaomichatbot_ph=" + url.QueryEscape(account.XiaomiChatbotPH)
-	req, err = http.NewRequest("POST", createURL, nil)
-	if err != nil {
-		slog.Error("创建请求失败", "error", err)
-		return false
-	}
-	m.setHeaders(req, account)
 
-	resp, err := m.doRequest(req)
-	if err != nil {
-		slog.Error("创建请求失败", "error", err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		slog.Error("解析创建响应失败", "error", err, "body", truncate(string(body), 200))
-		return false
-	}
-
-	switch result.Code {
-	case 0:
-		slog.Info("容器创建成功", "userId", account.UserID)
-		LogAccountInfo(account.UserID, "容器创建成功")
-		return true
-	case 7001:
-		slog.Warn("今日额度用完", "userId", account.UserID)
-		LogAccountWarn(account.UserID, "今日额度用完")
-		return false
-	case 200:
-		slog.Warn("账号被风控，冻结 24 小时", "userId", account.UserID)
-		LogAccountWarn(account.UserID, "账号被风控，冻结到明天")
-		m.mu.Lock()
-		if status, ok := m.statuses[account.UserID]; ok {
-			status.FrozenUntil = tomorrowMidnight()
+	// 午夜刷新：最多尝试3次确认是否风控
+	maxRetries := 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err = http.NewRequest("POST", createURL, nil)
+		if err != nil {
+			slog.Error("创建请求失败", "error", err)
+			return false
 		}
-		m.mu.Unlock()
-		return false
-	default:
-		slog.Warn("创建失败", "userId", account.UserID, "code", result.Code, "msg", result.Msg)
-		LogAccountWarn(account.UserID, "创建失败: code=%d, msg=%s", result.Code, result.Msg)
-		return false
+		m.setHeaders(req, account)
+
+		resp, err := m.doRequest(req)
+		if err != nil {
+			slog.Error("创建请求失败", "error", err)
+			return false
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		var result struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			slog.Error("解析创建响应失败", "error", err, "body", truncate(string(body), 200))
+			return false
+		}
+
+		switch result.Code {
+		case 0:
+			slog.Info("容器创建成功", "userId", account.UserID, "attempt", attempt)
+			LogAccountInfo(account.UserID, "容器创建成功 (第%d次尝试)", attempt)
+			return true
+		case 7001:
+			slog.Warn("今日额度用完", "userId", account.UserID)
+			LogAccountWarn(account.UserID, "今日额度用完")
+			return false
+		case 200:
+			// 风控状态：午夜刷新时重试确认
+			if attempt < maxRetries {
+				LogAccountWarn(account.UserID, "疑似风控 (第%d次)，重试确认...", attempt)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			// 3次都返回风控，确认为风控账号
+			slog.Warn("账号被风控，冻结 24 小时 (3次确认)", "userId", account.UserID)
+			LogAccountWarn(account.UserID, "账号被风控，冻结到明天 (3次确认)")
+			m.mu.Lock()
+			if status, ok := m.statuses[account.UserID]; ok {
+				status.FrozenUntil = tomorrowMidnight()
+			}
+			m.mu.Unlock()
+			return false
+		default:
+			slog.Warn("创建失败", "userId", account.UserID, "code", result.Code, "msg", result.Msg)
+			LogAccountWarn(account.UserID, "创建失败: code=%d, msg=%s", result.Code, result.Msg)
+			return false
+		}
 	}
+
+	return false
 }
 
 func (m *AccountManager) getTicket(account *Account) (string, error) {
@@ -753,7 +833,7 @@ func (m *AccountManager) injectBridge(account *Account, ticket string) bool {
 	if !injectBridgeImpl(m, account, ticket) {
 		return false
 	}
-	// executeInjection 内部已处理节点上线等待
+	// injectBridgeImpl 内部已处理节点上线等待
 	return true
 }
 

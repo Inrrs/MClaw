@@ -3,13 +3,12 @@
 MClaw Bridge (内置 fallback 版本)
 
 此文件通过 go:embed 嵌入到 MClaw 二进制中，作为外部 scripts/bridge.py 的回退。
-WS_URL 通过占位符由 Go PrepareBridgeCode 在运行时注入。
+WS_URL 通过 __WS_URL__ 占位符由 Go PrepareBridgeCode 运行时注入。
 
 ⚠️ 自动生成文件 — 请勿手动编辑！
    修改源码后运行: python3 scripts/build_fallback.py
 """
-#!/usr/bin/env python3
-import asyncio, websockets, httpx, json, os, traceback, base64, uuid
+import asyncio, websockets, httpx, json, os, traceback, uuid
 from datetime import datetime
 
 def _load_mimo_config():
@@ -22,18 +21,18 @@ def _load_mimo_config():
             if b.startswith("${"): b = os.path.expandvars(b)
             b = b.rstrip("/v1")
             if k and b: return k, b
-        except: continue
+        except Exception as e:
+            log(f"config skip {p}: {e}")
+            continue
     return "", ""
 
 _cfg_key, _cfg_base = _load_mimo_config()
 KEY = os.environ.get("MIMO_API_KEY") or _cfg_key
 BASE = _cfg_base
-WS_URL_B64 = "%s"
-WS_URL = base64.b64decode(WS_URL_B64).decode() if WS_URL_B64 != "%s" else ""
+WS_URL = "__WS_URL__"
 SYSTEM_PREFIX = "You are a personal assistant running inside OpenClaw."
 
 def strip_billing_header(text):
-
     if not text: return text
     lines = text.split('\n')
     result = []
@@ -44,16 +43,15 @@ def strip_billing_header(text):
     return '\n'.join(result).strip()
 
 def clean_content_blocks(content):
-
     if not isinstance(content, list): return content
     cleaned = []
     for b in content:
         if not isinstance(b, dict): continue
         btype = b.get('type', '')
         if btype == 'text' and not b.get('text', '').strip():
-            continue  # Skip empty text blocks
+            continue
         if btype == 'thinking' and not b.get('thinking', '').strip():
-            continue  # Skip empty thinking blocks
+            continue
         cleaned.append(b)
     return cleaned if cleaned else content
 
@@ -63,7 +61,9 @@ def log(msg):
 async def safe_send(ws, lock, data):
     try:
         async with lock: await ws.send(json.dumps(data, ensure_ascii=False))
-    except Exception as e: log(f"send err: {e}")
+    except Exception as e:
+        log(f"send err: {e}")
+        traceback.print_exc()
 
 def _to_text(c):
     if isinstance(c, str): return c
@@ -89,7 +89,6 @@ def fix_system_message(messages):
     return result
 
 def convert_anthropic_tools(tools):
-
     if not tools: return None
     result = []
     for t in tools:
@@ -268,10 +267,10 @@ async def stream_convert(ws, lock, req_id, r):
                 ci = 1 if th else 0
                 await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_stop", {"index": ci})})
             if tool_calls_buf:
-                if th:
+                if th and not co:
                     await safe_send(ws, lock, {"req_id": req_id, "type": "chunk", "body": sse("content_block_stop", {"index": 0})})
                 for i, tc in enumerate(tool_calls_buf):
-                    idx = (1 if th else 0) + i
+                    idx = (1 if th else 0) + (1 if co else 0) + i
                     try:
                         inp = json.loads(tc["function"]["arguments"])
                     except:
@@ -317,7 +316,7 @@ async def handle_request(ws, req, client, lock):
             for m in parsed.get("messages",[]):
                 messages.append(dict(m))
             messages = fix_system_message(messages)
-            openai_tools = tools  # Already OpenAI format
+            openai_tools = tools
 
         log(f"[{req_id}] msgs={len(messages)}")
         req_body = {"model": model, "messages": messages, "stream": stream}
@@ -327,6 +326,18 @@ async def handle_request(ws, req, client, lock):
             req_body["max_tokens"] = 4096
         if openai_tools:
             req_body["tools"] = openai_tools
+        tool_choice = parsed.get("tool_choice")
+        if tool_choice:
+            if is_anthropic:
+                tc_type = tool_choice.get("type", "auto") if isinstance(tool_choice, dict) else tool_choice
+                if tc_type == "auto":
+                    req_body["tool_choice"] = "auto"
+                elif tc_type == "any":
+                    req_body["tool_choice"] = "required"
+                elif tc_type == "tool" and isinstance(tool_choice, dict):
+                    req_body["tool_choice"] = {"type": "function", "function": {"name": tool_choice.get("name", "")}}
+            else:
+                req_body["tool_choice"] = tool_choice
         req_body_str = json.dumps(req_body, ensure_ascii=False)
         url = f"{BASE}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
@@ -364,19 +375,22 @@ async def handle_request(ws, req, client, lock):
         traceback.print_exc()
         await safe_send(ws, lock, {"req_id": req_id, "type": "error", "body": str(e)})
 
-async def sync_models(ws, client):
+async def sync_models(ws, client, lock):
     if not KEY: log("WARN: no key"); return
     try:
         resp = await client.get(f"{BASE}/v1/models", headers={"Authorization": f"Bearer {KEY}"}, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             ids = [m.get("id","") for m in data.get("data",[])]
-            await ws.send(json.dumps({"req_id":"__models__","type":"models","body":ids}))
+            await safe_send(ws, lock, {"req_id":"__models__","type":"models","body":ids})
             log(f"models: {len(ids)}")
     except Exception as e: log(f"sync err: {e}")
 
 async def main():
-    if not WS_URL: log("ERROR: no WS_URL"); return
+    _placeholder = "__" + "WS_URL" + "__"
+    if not WS_URL or WS_URL == _placeholder:
+        log("ERROR: no WS_URL")
+        return
     log(f"bridge start WS={WS_URL} API={BASE}")
     timeout = httpx.Timeout(connect=10, read=300, write=30, pool=10)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -387,8 +401,8 @@ async def main():
                 if retry > 1: log(f"reconnect #{retry}...")
                 async with websockets.connect(WS_URL, max_size=10**8, open_timeout=15, close_timeout=5, ping_interval=20, ping_timeout=10) as ws:
                     retry = 0; log("WS connected")
-                    await sync_models(ws, client)
                     lock = asyncio.Lock()
+                    await sync_models(ws, client, lock)
                     while True:
                         try:
                             raw = await ws.recv(decode=False)
