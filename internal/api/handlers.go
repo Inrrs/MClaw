@@ -416,7 +416,14 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 				body = replaceModel(body, mapped)
 			}
 		}
-		// bridge 处理 max_tokens 截断和 system prompt，网关直接透传
+		// 图片请求自动降级：mimo-v2.5-pro 不支持图片，切换到 mimo-v2.5
+		if containsImage(body) {
+			curModel := getRequestModel(body)
+			if curModel != "" && !strings.Contains(curModel, "mimo-v2.5") {
+				body = replaceModel(body, "mimo-v2.5")
+				slog.Info("图片请求自动降级", "from", curModel, "to", "mimo-v2.5")
+			}
+		}
 		handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, w, body)
 	}
 }
@@ -441,6 +448,14 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
+		}
+		// 图片请求自动降级：mimo-v2.5-pro 不支持图片
+		if containsImage(body) {
+			curModel := getRequestModel(body)
+			if curModel != "" && !strings.Contains(curModel, "mimo-v2.5") {
+				body = replaceModel(body, "mimo-v2.5")
+				slog.Info("图片请求自动降级(Anthropic)", "from", curModel, "to", "mimo-v2.5")
+			}
 		}
 		// 保留原始路径，bridge 根据 path 判断格式并转换
 		handleProxyRequest(r.Context(), pool, r.URL.Path, true, w, body)
