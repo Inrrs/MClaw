@@ -381,8 +381,8 @@ func handleProxyRequest(ctx context.Context, pool *gateway.NodePool, path string
 	if !skipNormalize {
 		body = prepareRequest(body, true)
 	}
-	// 调试：记录发给 bridge 的请求体（截断）
-	slog.Warn("bridge 请求", "path", path, "skipNormalize", skipNormalize, "body", utils.Truncate(string(body), 2000))
+	// 调试：只在 DEBUG 级别记录请求体
+	slog.Debug("bridge 请求", "path", path, "skipNormalize", skipNormalize, "body_len", len(body))
 
 	pending, node, err := sendToAvailableNode(pool, "POST", path, body)
 	if err != nil {
@@ -590,7 +590,7 @@ func handleStreamResponse(ctx context.Context, w http.ResponseWriter, pending *g
 						if json.Unmarshal(body, &errCheck) == nil {
 							if e, ok := errCheck["error"]; ok {
 								errJSON, _ := json.Marshal(e)
-								slog.Warn("上游错误详情", "body", string(errJSON))
+								slog.Debug("上游错误详情", "body", string(errJSON))
 							}
 						}
 					}
