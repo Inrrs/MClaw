@@ -357,9 +357,22 @@ textarea{resize:vertical;min-height:80px}
       <button class="btn btn-primary" onclick="updateProxy()" style="white-space:nowrap">保存</button>
     </div>
   </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>IP 白名单</div>
+    </div>
+    <div id="whitelistStats" class="stats-grid" style="margin-bottom:12px">
+      <div class="stat-card"><div class="stat-value" style="color:var(--text-muted)">-</div><div class="stat-label">加载中</div></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:flex-end">
+      <div style="flex:1">
+        <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">白名单 URL（粘贴完整链接自动解析 uid/key）</label>
+        <input id="whitelistUrl" type="text" placeholder="http://op.xiequ.cn/IpWhiteList.aspx?uid=xxx&ukey=xxx&act=get" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px">
+      </div>
+      <button class="btn btn-primary" onclick="updateWhitelist()" style="white-space:nowrap">保存</button>
+    </div>
+  </div>
 </div>
-
-<!-- Errors Tab -->
 <div id="tab-errors" class="tab-content">
   <div class="card">
     <div class="card-header">
@@ -624,6 +637,29 @@ async function updateProxy(){
     else{toast('保存失败: '+(r.error||'未知错误'),'danger')}
   }catch(e){toast('保存失败: '+e.message,'danger')}
 }
+async function loadWhitelistStats(){
+  try{const d=await api('/api/whitelist'),el=$('#whitelistStats');
+  if(!d.configured){el.innerHTML='<div class="empty"><p>未配置白名单</p></div>';return}
+  const cards=[
+    {v:d.public_ip||'-',l:'当前公网 IP',c:'font-size:14px;font-family:monospace'},
+    {v:d.ip_in_whitelist?'✅ 是':'❌ 否',l:'IP 已在白名单',c:d.ip_in_whitelist?'color:var(--success)':'color:var(--danger)'},
+    {v:d.count||0,l:'白名单条目数',c:''}
+  ];
+  if(d.whitelist&&d.whitelist.length){
+    d.whitelist.forEach(item=>{cards.push({v:item.ip+(item.meno?' ('+item.meno+')':''),l:'白名单 IP',c:'font-size:12px;font-family:monospace'})})
+  }
+  el.innerHTML=cards.map(m=>'<div class="stat-card"><div class="stat-value" style="'+m.c+'">'+m.v+'</div><div class="stat-label">'+m.l+'</div></div>').join('')}
+  catch(e){$('#whitelistStats').innerHTML='<span style="color:var(--danger)">加载失败</span>'}
+}
+async function updateWhitelist(){
+  const url=$('#whitelistUrl').value.trim();
+  if(!url){toast('请输入白名单 URL','warning');return}
+  try{
+    const r=await api('/api/whitelist',{method:'POST',body:JSON.stringify({url:url})});
+    if(r.ok){toast('白名单配置已保存','success');loadWhitelistStats()}
+    else{toast('保存失败: '+(r.error||'未知错误'),'danger')}
+  }catch(e){toast('保存失败: '+e.message,'danger')}
+}
 
 // Test account
 async function testAccount(uid){
@@ -711,13 +747,13 @@ loadMetrics();
 setTimeout(loadAccounts,500);
 setTimeout(loadModels,1000);
 setTimeout(loadMapping,1500);
-setTimeout(loadProxyStats,2000);
+setTimeout(loadProxyStats,2000);setTimeout(loadWhitelistStats,2500);
 setTimeout(loadErrorLogs,2500);
 // 防止并发加载
 let _loadingMetrics=false,_loadingAccounts=false;
 const _loadMetrics=loadMetrics;loadMetrics=async function(){if(_loadingMetrics)return;_loadingMetrics=true;try{await _loadMetrics()}finally{_loadingMetrics=false}};
 const _loadAccounts=loadAccounts;loadAccounts=async function(){if(_loadingAccounts)return;_loadingAccounts=true;try{await _loadAccounts()}finally{_loadingAccounts=false}};
-setInterval(loadMetrics,10000);setInterval(loadAccounts,30000);setInterval(loadModels,30000);setInterval(loadProxyStats,30000);setInterval(loadErrorLogs,15000);
+setInterval(loadMetrics,10000);setInterval(loadAccounts,30000);setInterval(loadModels,30000);setInterval(loadProxyStats,30000);setInterval(loadWhitelistStats,60000);setInterval(loadErrorLogs,15000);
 
 // Close modal on backdrop click
 $('#importModal').addEventListener('click',function(e){if(e.target===this)hideImportModal()});
