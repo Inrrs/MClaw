@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -396,10 +397,30 @@ func (h *Handler) handleErrorLogs(w http.ResponseWriter, r *http.Request) {
 func parseCookieString(s string) (*manager.Account, error) {
 	s = strings.TrimSpace(s)
 
+	// 从 curl 命令提取 URL 中的 xiaomichatbot_ph（作为 fallback）
+	urlPH := ""
 	if strings.HasPrefix(s, "curl ") {
-		s = extractCookieFromCurl(s)
-		if s == "" {
-			return nil, fmt.Errorf("无法从 curl 命令中提取 cookie")
+		if idx := strings.Index(s, "xiaomichatbot_ph="); idx >= 0 {
+			start := idx + len("xiaomichatbot_ph=")
+			end := start
+			for end < len(s) && s[end] != '&' && s[end] != '\'' && s[end] != '"' && s[end] != ' ' && s[end] != '\\' {
+				end++
+			}
+			urlPH = s[start:end]
+			// URL 解码
+			if decoded, err := url.QueryUnescape(urlPH); err == nil {
+				urlPH = decoded
+			}
+		}
+		cookieStr := extractCookieFromCurl(s)
+		if cookieStr == "" {
+			// 即使没提取到 cookie，如果 URL 有 ph 也尝试继续
+			if urlPH == "" {
+				return nil, fmt.Errorf("无法从 curl 命令中提取 cookie")
+			}
+			s = ""
+		} else {
+			s = cookieStr
 		}
 	}
 
@@ -426,6 +447,11 @@ func parseCookieString(s string) (*manager.Account, error) {
 	st := cookies["serviceToken"]
 	ph := cookies["xiaomichatbot_ph"]
 
+	// URL 参数中的 ph 作为 fallback
+	if ph == "" && urlPH != "" {
+		ph = urlPH
+	}
+
 	if uid == "" || st == "" || ph == "" {
 		return nil, fmt.Errorf("缺少必要字段 (userId=%s, serviceToken=%v, ph=%s)", uid, st != "", ph)
 	}
@@ -441,6 +467,7 @@ func parseCookieString(s string) (*manager.Account, error) {
 func extractCookieFromCurl(s string) string {
 	s = joinCurlLines(s)
 
+	// 方式 1: -b / --cookie 参数
 	var cookieStart int
 	var quoteChar byte
 
@@ -455,6 +482,19 @@ func extractCookieFromCurl(s string) string {
 		quoteChar = '\''
 	} else if idx := strings.Index(s, ` --cookie "`); idx >= 0 {
 		cookieStart = idx + 11
+		quoteChar = '"'
+	} else if idx := strings.Index(s, " -H 'Cookie:"); idx >= 0 {
+		// 方式 2: -H 'Cookie: ...' 头格式
+		cookieStart = idx + 13
+		quoteChar = '\''
+	} else if idx := strings.Index(s, ` -H "Cookie:`); idx >= 0 {
+		cookieStart = idx + 13
+		quoteChar = '"'
+	} else if idx := strings.Index(s, " -H 'cookie:"); idx >= 0 {
+		cookieStart = idx + 13
+		quoteChar = '\''
+	} else if idx := strings.Index(s, ` -H "cookie:`); idx >= 0 {
+		cookieStart = idx + 13
 		quoteChar = '"'
 	} else {
 		return ""
