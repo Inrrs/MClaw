@@ -366,9 +366,9 @@ func prepareRequest(body []byte, applyMapping bool) []byte {
 		}
 		if containsImage(body) {
 			curModel := getRequestModel(body)
-			if curModel != "" && !strings.Contains(curModel, "mimo-v2.5") {
+			if curModel != "" && curModel != "mimo-v2.5" && curModel != "mimo-v2-flash" {
 				body = replaceModel(body, "mimo-v2.5")
-				slog.Info("图片请求自动降级", "to", "mimo-v2.5")
+				slog.Info("图片请求自动降级", "from", curModel, "to", "mimo-v2.5")
 			}
 		}
 	}
@@ -419,7 +419,7 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 		// 图片请求自动降级：mimo-v2.5-pro 不支持图片，切换到 mimo-v2.5
 		if containsImage(body) {
 			curModel := getRequestModel(body)
-			if curModel != "" && !strings.Contains(curModel, "mimo-v2.5") {
+			if curModel != "" && curModel != "mimo-v2.5" && curModel != "mimo-v2-flash" {
 				body = replaceModel(body, "mimo-v2.5")
 				slog.Info("图片请求自动降级", "from", curModel, "to", "mimo-v2.5")
 			}
@@ -452,7 +452,7 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 		// 图片请求自动降级：mimo-v2.5-pro 不支持图片
 		if containsImage(body) {
 			curModel := getRequestModel(body)
-			if curModel != "" && !strings.Contains(curModel, "mimo-v2.5") {
+			if curModel != "" && curModel != "mimo-v2.5" && curModel != "mimo-v2-flash" {
 				body = replaceModel(body, "mimo-v2.5")
 				slog.Info("图片请求自动降级(Anthropic)", "from", curModel, "to", "mimo-v2.5")
 			}
