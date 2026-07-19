@@ -416,7 +416,8 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 				body = replaceModel(body, mapped)
 			}
 		}
-		// 图片请求自动降级：mimo-v2.5-pro 不支持图片，切换到 mimo-v2.5
+		// 图片请求自动降级：mimo-v2.5-pro 不支持图片，切到 mimo-v2.5
+		// bridge 已修：mimo-v2.5 不注入 system prompt，不会 400
 		if containsImage(body) {
 			curModel := getRequestModel(body)
 			if curModel != "" && curModel != "mimo-v2.5" && curModel != "mimo-v2-flash" {
@@ -427,8 +428,6 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 		handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, w, body)
 	}
 }
-
-// HandleResponses OpenAI Responses API
 func HandleResponses(pool *gateway.NodePool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := readBody(r)

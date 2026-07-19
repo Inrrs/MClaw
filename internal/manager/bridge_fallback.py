@@ -71,7 +71,10 @@ def _to_text(c):
     if isinstance(c, dict): return c.get("text", json.dumps(c, ensure_ascii=False))
     return str(c)
 
-def fix_system_message(messages):
+def fix_system_message(messages, model=""):
+    # 只有 mimo-v2.5-pro 需要 system prompt，其他模型注入会导致 400
+    if model and "mimo-v2.5-pro" not in model:
+        return [m for m in messages if m.get("role") != "system"]
     result = []
     has_system = False
     for m in messages:
@@ -101,7 +104,7 @@ def convert_anthropic_tools(tools):
             result.append({"type": "function", "function": func})
     return result if result else None
 
-def convert_messages(parsed, path):
+def convert_messages(parsed, path, model=""):
     messages = []
     if "/anthropic/" in path:
         s = parsed.get("system","")
@@ -160,7 +163,7 @@ def convert_messages(parsed, path):
             role = m.get("role","user")
             c = _to_text(m.get("content",""))
             messages.append({"role": role, "content": c})
-    return fix_system_message(messages)
+    return fix_system_message(messages, model)
 
 def openai_to_anthropic(oai):
     choice = oai.get("choices",[{}])[0]
@@ -309,13 +312,13 @@ async def handle_request(ws, req, client, lock):
         log(f"[{req_id}] path={path} model={model} stream={stream} tools={len(tools) if tools else 0}")
 
         if is_anthropic:
-            messages = convert_messages(parsed, path)
+            messages = convert_messages(parsed, path, model)
             openai_tools = convert_anthropic_tools(tools)
         else:
             messages = []
             for m in parsed.get("messages",[]):
                 messages.append(dict(m))
-            messages = fix_system_message(messages)
+            messages = fix_system_message(messages, model)
             openai_tools = tools
 
         log(f"[{req_id}] msgs={len(messages)}")
