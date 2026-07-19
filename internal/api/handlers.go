@@ -16,6 +16,7 @@ import (
 
 	"mclaw/internal/gateway"
 	"mclaw/internal/metrics"
+	"mclaw/internal/utils"
 )
 
 func AuthMiddleware(apiKey string) func(http.Handler) http.Handler {
@@ -658,7 +659,7 @@ func recordRequestError(pool *gateway.NodePool, nodeID, path string, status int,
 			NodeID:  nodeID,
 			Status:  status,
 			Path:    path,
-			Message: truncate(errMsg, 500),
+			Message: utils.Truncate(errMsg, 500),
 		})
 	}
 }
@@ -705,7 +706,7 @@ func handleProxyRequest(ctx context.Context, pool *gateway.NodePool, path string
 		body = prepareRequest(body, true)
 	}
 	// 调试：记录发给 bridge 的请求体（截断）
-	slog.Warn("bridge 请求", "path", path, "skipNormalize", skipNormalize, "body", truncate(string(body), 2000))
+	slog.Warn("bridge 请求", "path", path, "skipNormalize", skipNormalize, "body", utils.Truncate(string(body), 2000))
 
 	pending, node, err := sendToAvailableNode(pool, "POST", path, body)
 	if err != nil {
@@ -764,7 +765,7 @@ func HandleResponses(pool *gateway.NodePool) http.HandlerFunc {
 }
 
 // HandleMessages Anthropic Messages API
-// 网关侧做 Anthropic → OpenAI 请求转换 + OpenAI → Anthropic 响应转换
+// 网关侧做 Anthropic → OpenAI 请求转换，bridge 透传 OpenAI → MIMO
 func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := readBody(r)
@@ -772,19 +773,13 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		isAnthropic := strings.Contains(r.URL.Path, "/anthropic/")
-		if isAnthropic {
-			converted := convertAnthropicToOpenAI(body)
-			converted = capMaxTokens(converted, 16384)
-			slog.Debug("Anthropic→OpenAI 转换", "before", len(body), "after", len(converted))
-			// 用包装 writer 拦截响应，转换回 Anthropic 格式
-			rw := &anthropicResponseWriter{ResponseWriter: w}
-			// Anthropic 已转换为 OpenAI，跳过 normalizeBody（避免二次处理）
-			handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, converted)
-			rw.flush()
-		} else {
-			handleProxyRequest(r.Context(), pool, "/v1/chat/completions", false, w, body)
-		}
+		converted := convertAnthropicToOpenAI(body)
+		converted = capMaxTokens(converted, 16384)
+		slog.Debug("Anthropic→OpenAI 转换", "before", len(body), "after", len(converted))
+		// 用包装 writer 拦截响应，转换回 Anthropic 格式
+		rw := &anthropicResponseWriter{ResponseWriter: w}
+		handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, converted)
+		rw.flush()
 	}
 }
 
@@ -1202,12 +1197,7 @@ func readBody(r *http.Request) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r.Body, 10<<20))
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
-}
+
 
 // sanitizeUTF8 清理非法 UTF-8 字节
 func sanitizeUTF8(b []byte) []byte {

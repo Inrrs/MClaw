@@ -18,6 +18,7 @@ import (
 
 	"mclaw/internal/gateway"
 	"mclaw/internal/metrics"
+	"mclaw/internal/utils"
 	"mclaw/internal/proxy"
 )
 
@@ -699,7 +700,7 @@ func (m *AccountManager) getContainerStatus(account *Account) (string, int, erro
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", 0, fmt.Errorf("解析状态响应失败: %w (body: %s)", err, truncate(string(body), 200))
+		return "", 0, fmt.Errorf("解析状态响应失败: %w (body: %s)", err, utils.Truncate(string(body), 200))
 	}
 
 	if result.Code != 0 {
@@ -753,7 +754,7 @@ func (m *AccountManager) createContainer(account *Account) bool {
 			Msg  string `json:"msg"`
 		}
 		if err := json.Unmarshal(body, &result); err != nil {
-			slog.Error("解析创建响应失败", "error", err, "body", truncate(string(body), 200))
+			slog.Error("解析创建响应失败", "error", err, "body", utils.Truncate(string(body), 200))
 			return false
 		}
 
@@ -815,7 +816,7 @@ func (m *AccountManager) getTicket(account *Account) (string, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("解析 ticket 响应失败: %w (body: %s)", err, truncate(string(body), 200))
+		return "", fmt.Errorf("解析 ticket 响应失败: %w (body: %s)", err, utils.Truncate(string(body), 200))
 	}
 
 	if result.Code != 0 {
