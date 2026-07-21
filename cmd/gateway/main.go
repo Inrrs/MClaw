@@ -63,6 +63,9 @@ func main() {
 	// 加载模型映射
 	api.LoadModelMapping(cfg.ModelMappingPath())
 
+	// 确保 data 目录存在（metrics 等运行时文件需要）
+	os.MkdirAll(cfg.GetDataDir(), 0755)
+
 	// 初始化 metrics 持久化（重启后恢复历史 Token 用量）
 	metrics.SetSavePath(filepath.Join(cfg.GetDataDir(), "metrics.json"))
 

@@ -150,7 +150,7 @@ func (m *Manager) refresh() {
 	m.expiresAt = time.Now().Add(time.Duration(interval) * time.Second)
 	m.mu.Unlock()
 
-	slog.Info("代理刷新成功", "count", len(proxies))
+	slog.Debug("代理刷新成功", "count", len(proxies))
 }
 
 // GetProxy 获取当前代理（不消耗）
@@ -188,11 +188,11 @@ func (m *Manager) EnsureAvailable() string {
 		if m.testProxy(proxy) {
 			return proxy
 		}
-		slog.Warn("代理不可用，切换下一个", "proxy", proxy)
+		slog.Debug("代理不可用，切换下一个", "proxy", proxy)
 		m.RotateProxy()
 	}
 	// 全部不可用，刷新代理池获取新 IP
-	slog.Info("当前代理池全部不可用，尝试刷新")
+	slog.Warn("当前代理池全部不可用，尝试刷新")
 	m.refresh()
 	newCount := m.GetProxyCount()
 	if newCount == 0 {
@@ -204,7 +204,7 @@ func (m *Manager) EnsureAvailable() string {
 		if m.testProxy(proxy) {
 			return proxy
 		}
-		slog.Warn("新代理不可用，切换下一个", "proxy", proxy)
+		slog.Debug("新代理不可用，切换下一个", "proxy", proxy)
 		m.RotateProxy()
 	}
 	// 刷新后仍全部不可用，代理池额度可能用完了

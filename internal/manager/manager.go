@@ -305,16 +305,17 @@ func (m *AccountManager) tick() {
 	status := m.statuses[current.UserID]
 	m.mu.RUnlock()
 
-	// 当前账号在冷却中（创建失败后 4 小时内），不要反复尝试切换
-	if status != nil && !status.LastFailTime.IsZero() && time.Since(status.LastFailTime) < 4*time.Hour {
-		remain := int(4*time.Hour.Seconds() - time.Since(status.LastFailTime).Seconds())
-		slog.Debug("当前账号在冷却中，跳过切换", "userId", current.UserID, "冷却剩余", remain)
+	// 容器已过期或不可用，必须切换（不管冷却状态）
+	if status == nil || status.Status != "AVAILABLE" || status.RemainSec <= 0 {
+		slog.Warn("当前账号不可用，切换", "userId", current.UserID)
+		go m.tryCreateAndConnect()
 		return
 	}
 
-	if status == nil || status.Status != "AVAILABLE" {
-		slog.Warn("当前账号不可用，切换", "userId", current.UserID)
-		go m.tryCreateAndConnect()
+	// 当前账号在冷却中（创建失败后 4 小时内），不要反复尝试切换
+	if !status.LastFailTime.IsZero() && time.Since(status.LastFailTime) < 4*time.Hour {
+		remain := int(4*time.Hour.Seconds() - time.Since(status.LastFailTime).Seconds())
+		slog.Debug("当前账号在冷却中，跳过切换", "userId", current.UserID, "冷却剩余", remain)
 		return
 	}
 
@@ -548,8 +549,13 @@ func (m *AccountManager) doCreateAndConnect() {
 
 		if status == "NOT_CREATED" || status == "CREATE_FAILED" || status == "DESTROYED" || remainSec <= 0 {
 			LogAccountInfo(account.UserID, "尝试创建容器")
-			m.tryCreateForAccount(account)
-			return
+			if m.tryCreateForAccount(account) {
+				// 创建+注入成功，切换完成
+				return
+			}
+			// 创建失败，继续尝试下一个账号
+			LogAccountWarn(account.UserID, "创建/注入失败，尝试下一个账号")
+			continue
 		}
 
 		LogAccountInfo(account.UserID, "状态 %s，跳过", status)
@@ -558,11 +564,11 @@ func (m *AccountManager) doCreateAndConnect() {
 	LogAccountWarn("", "所有账号不可用或在冷却中，等待下次检查")
 }
 
-func (m *AccountManager) tryCreateForAccount(account *Account) {
+func (m *AccountManager) tryCreateForAccount(account *Account) bool {
 	status, remainSec, err := m.getContainerStatus(account)
 	if err != nil {
 		slog.Error("检查状态失败", "userId", account.UserID, "error", err)
-		return
+		return false
 	}
 
 	m.mu.Lock()
@@ -597,12 +603,12 @@ func (m *AccountManager) tryCreateForAccount(account *Account) {
 			}
 			if status != "CREATING" {
 				LogAccountError(account.UserID, "容器状态异常: %s", status)
-				return
+				return false
 			}
 		}
 		if status != "AVAILABLE" {
 			LogAccountError(account.UserID, "容器未就绪: %s", status)
-			return
+			return false
 		}
 	}
 
@@ -616,7 +622,7 @@ func (m *AccountManager) tryCreateForAccount(account *Account) {
 			MarkTodayCreated(account.UserID)
 			go SaveManagerState(m.getCurrentUserID(), m.snapshotStatuses())
 			LogAccountWarn(account.UserID, "创建失败，进入冷却")
-			return
+			return false
 		}
 
 		// 创建成功，清除失败冷却标记
@@ -646,13 +652,13 @@ func (m *AccountManager) tryCreateForAccount(account *Account) {
 			}
 			// 其他状态（CREATE_FAILED, DESTROYED 等）
 			LogAccountError(account.UserID, "容器状态异常: %s", status)
-			return
+			return false
 		}
 
 		if status != "AVAILABLE" {
 			slog.Error("容器未就绪", "userId", account.UserID, "status", status)
 			LogAccountError(account.UserID, "容器未就绪: %s", status)
-			return
+			return false
 		}
 		LogAccountInfo(account.UserID, "容器就绪: %s, 剩余: %d秒", status, remainSec)
 
@@ -666,7 +672,7 @@ func (m *AccountManager) tryCreateForAccount(account *Account) {
 	if err != nil {
 		slog.Error("获取 ticket 失败", "userId", account.UserID, "error", err)
 		LogAccountError(account.UserID, "获取 ticket 失败: %v", err)
-		return
+		return false
 	}
 	LogAccountInfo(account.UserID, "获取 ticket 成功")
 
@@ -681,12 +687,13 @@ func (m *AccountManager) tryCreateForAccount(account *Account) {
 		} else {
 			LogAccountError(account.UserID, "注入 bridge 失败")
 		}
-		return
+		return false
 	}
 
 	slog.Info("注入成功，切换为当前账号", "userId", account.UserID, "剩余", remainSec)
 	LogAccountInfo(account.UserID, "注入成功，切换为当前账号，剩余: %d秒", remainSec)
 	m.setCurrentAccount(account.UserID, remainSec)
+	return true
 }
 
 func (m *AccountManager) getContainerStatus(account *Account) (string, int, error) {
