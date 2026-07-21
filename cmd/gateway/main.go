@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"mclaw/internal/gateway"
 	"mclaw/internal/logger"
 	"mclaw/internal/manager"
+	"mclaw/internal/metrics"
 	"mclaw/internal/proxy"
 	"mclaw/internal/webui"
 
@@ -60,6 +62,9 @@ func main() {
 
 	// 加载模型映射
 	api.LoadModelMapping(cfg.ModelMappingPath())
+
+	// 初始化 metrics 持久化（重启后恢复历史 Token 用量）
+	metrics.SetSavePath(filepath.Join(cfg.GetDataDir(), "metrics.json"))
 
 	// 初始化鉴权
 	authMgr := auth.New(cfg.Auth.APIKey, cfg.Auth.WebUIUser, cfg.Auth.WebUIPass, "")
@@ -223,6 +228,7 @@ func main() {
 	proxyMgr.Stop()
 	nodePool.Stop()
 	accountMgr.Stop()
+	metrics.Get().Save() // 持久化 Token 用量，重启后不丢失
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

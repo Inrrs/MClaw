@@ -448,14 +448,6 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		// 图片请求自动降级：mimo-v2.5-pro 不支持图片
-		if containsImage(body) {
-			curModel := getRequestModel(body)
-			if curModel != "" && curModel != "mimo-v2.5" && curModel != "mimo-v2-flash" {
-				body = replaceModel(body, "mimo-v2.5")
-				slog.Info("图片请求自动降级(Anthropic)", "from", curModel, "to", "mimo-v2.5")
-			}
-		}
 		// 保留原始路径，bridge 根据 path 判断格式并转换
 		handleProxyRequest(r.Context(), pool, r.URL.Path, true, w, body)
 	}

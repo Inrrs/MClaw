@@ -1,6 +1,10 @@
 package metrics
 
 import (
+	"encoding/json"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +45,10 @@ type Metrics struct {
 
 	// 价格配置
 	prices atomic.Pointer[PriceConfig]
+
+	// 持久化
+	savePath string
+	saveMu   sync.Mutex
 }
 
 var global *Metrics
@@ -55,6 +63,13 @@ func Get() *Metrics {
 	return global
 }
 
+// SetSavePath 设置持久化文件路径，并从文件恢复历史数据
+func SetSavePath(path string) {
+	m := Get()
+	m.savePath = path
+	m.load()
+}
+
 func (m *Metrics) RecordRequest(success bool, usage TokenUsage, duration time.Duration) {
 	m.TotalRequests.Add(1)
 	if success {
@@ -67,6 +82,11 @@ func (m *Metrics) RecordRequest(success bool, usage TokenUsage, duration time.Du
 	m.CacheTokens.Add(int64(usage.CacheTokens))
 	m.TotalTokens.Add(int64(usage.InputTokens + usage.OutputTokens + usage.CacheTokens))
 	m.RequestDuration.Add(int64(duration.Milliseconds()))
+
+	// 每 100 次请求自动保存一次
+	if m.TotalRequests.Load()%100 == 0 {
+		m.save()
+	}
 }
 
 func (m *Metrics) UpdateAccounts(total, online int) {
@@ -81,6 +101,87 @@ func (m *Metrics) UpdateNodes(total, active int) {
 
 func (m *Metrics) Uptime() time.Duration {
 	return time.Since(m.StartTime)
+}
+
+// metricsSnapshot JSON 持久化快照
+type metricsSnapshot struct {
+	TotalRequests   int64 `json:"total_requests"`
+	SuccessRequests int64 `json:"success_requests"`
+	FailedRequests  int64 `json:"failed_requests"`
+	TotalTokens     int64 `json:"total_tokens"`
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	CacheTokens     int64 `json:"cache_tokens"`
+	TotalDuration   int64 `json:"total_duration_ms"`
+	SavedAt         string `json:"saved_at"`
+}
+
+// save 将当前计数器持久化到 JSON 文件（不重置计数器，支持跨重启累加）
+func (m *Metrics) save() {
+	if m.savePath == "" {
+		return
+	}
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+
+	snap := metricsSnapshot{
+		TotalRequests:   m.TotalRequests.Load(),
+		SuccessRequests: m.SuccessRequests.Load(),
+		FailedRequests:  m.FailedRequests.Load(),
+		TotalTokens:     m.TotalTokens.Load(),
+		InputTokens:     m.InputTokens.Load(),
+		OutputTokens:    m.OutputTokens.Load(),
+		CacheTokens:     m.CacheTokens.Load(),
+		TotalDuration:   m.RequestDuration.Load(),
+		SavedAt:         time.Now().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		slog.Error("序列化 metrics 失败", "error", err)
+		return
+	}
+	os.MkdirAll(filepath.Dir(m.savePath), 0755)
+	if err := os.WriteFile(m.savePath, data, 0644); err != nil {
+		slog.Error("保存 metrics 失败", "error", err)
+	}
+}
+
+// load 从 JSON 文件恢复历史计数器（累加到当前值）
+func (m *Metrics) load() {
+	if m.savePath == "" {
+		return
+	}
+	data, err := os.ReadFile(m.savePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("读取 metrics 失败", "error", err)
+		}
+		return
+	}
+	var snap metricsSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		slog.Warn("解析 metrics 失败", "error", err)
+		return
+	}
+	// 累加历史值（原子操作，无需锁）
+	m.TotalRequests.Add(snap.TotalRequests)
+	m.SuccessRequests.Add(snap.SuccessRequests)
+	m.FailedRequests.Add(snap.FailedRequests)
+	m.TotalTokens.Add(snap.TotalTokens)
+	m.InputTokens.Add(snap.InputTokens)
+	m.OutputTokens.Add(snap.OutputTokens)
+	m.CacheTokens.Add(snap.CacheTokens)
+	m.RequestDuration.Add(snap.TotalDuration)
+	slog.Info("恢复历史 metrics",
+		"total_requests", snap.TotalRequests,
+		"input_tokens", snap.InputTokens,
+		"output_tokens", snap.OutputTokens,
+		"saved_at", snap.SavedAt)
+}
+
+// Save 手动触发持久化（关闭时调用）
+func (m *Metrics) Save() {
+	m.save()
 }
 
 // PriceConfig 价格配置（元/百万 tokens）

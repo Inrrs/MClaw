@@ -43,23 +43,25 @@ func (h *Handler) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	statuses := h.manager.GetStatus()
 	slog.Debug("账号列表查询", "count", len(statuses))
 	type AccountInfo struct {
-		UserID    string `json:"user_id"`
-		Name      string `json:"name"`
-		Group     string `json:"group"`
-		Status    string `json:"status"`
-		RemainSec int    `json:"remain_sec"`
-		IsCurrent bool   `json:"is_current"`
+		UserID       string `json:"user_id"`
+		Name         string `json:"name"`
+		Group        string `json:"group"`
+		Status       string `json:"status"`
+		RemainSec    int    `json:"remain_sec"`
+		IsCurrent    bool   `json:"is_current"`
+		TodayCreated bool   `json:"today_created"`
 	}
 
 	accounts := make([]AccountInfo, 0)
 	for _, s := range statuses {
 		accounts = append(accounts, AccountInfo{
-			UserID:    s.Account.UserID,
-			Name:      s.Account.Name,
-			Group:     s.Account.Group,
-			Status:    s.Status,
-			RemainSec: s.RemainSec,
-			IsCurrent: s.IsCurrent,
+			UserID:       s.Account.UserID,
+			Name:         s.Account.Name,
+			Group:        s.Account.Group,
+			Status:       s.Status,
+			RemainSec:    s.RemainSec,
+			IsCurrent:    s.IsCurrent,
+			TodayCreated: manager.IsTodayCreated(s.Account.UserID),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

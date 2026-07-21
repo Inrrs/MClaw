@@ -288,7 +288,7 @@ textarea{resize:vertical;min-height:80px}
       <table>
         <thead><tr>
           <th style="width:40px"><input type="checkbox" class="checkbox" id="selectAll" onchange="toggleSelectAll()" aria-label="全选"></th>
-          <th>用户ID</th><th>名称</th><th>状态</th><th>剩余时间</th><th>当前</th><th style="width:160px">操作</th>
+          <th>用户ID</th><th>名称</th><th>状态</th><th>剩余时间</th><th>今日创建</th><th>当前</th><th style="width:160px">操作</th>
         </tr></thead>
         <tbody id="accounts">
           <tr><td colspan="7" class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><p>加载中...</p></td></tr>
@@ -507,11 +507,14 @@ async function loadAccounts(){
   try{
     const d=await api('/api/accounts'),tb=$('#accounts');
     if(!tb)return;
-    if(d.error){tb.innerHTML='<tr><td colspan="7" class="empty" style="color:var(--danger)"><p>加载失败: '+esc(d.error)+'，<a href="javascript:loadAccounts()">重试</a></p></td></tr>';return}
+    if(d.error){tb.innerHTML='<tr><td colspan="8" class="empty" style="color:var(--danger)"><p>加载失败: '+esc(d.error)+'，<a href="javascript:loadAccounts()">重试</a></p></td></tr>';return}
     if(!d||!Array.isArray(d)||d.length===0){
-      tb.innerHTML='<tr><td colspan="7" class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="40" height="40"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><p>暂无账号，点击「导入账号」添加</p></td></tr>';
+      tb.innerHTML='<tr><td colspan="8" class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="40" height="40"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><p>暂无账号，点击「导入账号」添加</p></td></tr>';
       return;
     }
+    // 记录当前展开的日志面板
+    const openLogs=new Set();
+    $$('#accounts tr[id^="logs-"]').forEach(r=>{if(r.style.display!=='none')openLogs.add(r.id.replace('logs-',''))});
     tb.innerHTML=d.map(a=>{
       const uid=a.user_id;
       return'<tr class="'+(a.is_current?'current':'')+'">'+
@@ -520,6 +523,7 @@ async function loadAccounts(){
         '<td>'+(a.name?esc(a.name):'<span style="color:var(--text-muted)">-</span>')+'</td>'+
         '<td>'+sBadge(a.status)+'</td>'+
         '<td>'+fmtSec(a.remain_sec)+'</td>'+
+        '<td>'+(a.today_created?'<span style="color:var(--warn);font-weight:600">是</span>':'<span style="color:var(--text-muted)">否</span>')+'</td>'+
         '<td>'+(a.is_current?'<span style="color:var(--success);font-weight:600">当前</span>':'-')+'</td>'+
         '<td><div style="display:flex;gap:4px">'+
           '<button class="btn btn-ghost btn-sm" onclick="testAccount(\''+esc(uid)+'\')" title="测试调用模型"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></button>'+
@@ -527,8 +531,10 @@ async function loadAccounts(){
           '<button class="btn btn-ghost btn-sm" onclick="toggleLogs(\''+esc(uid)+'\')" title="查看日志"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></button>'+
           '<button class="btn btn-ghost btn-sm" onclick="del(\''+esc(uid)+'\')" title="删除" style="color:var(--danger)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>'+
         '</div></td></tr>'+
-        '<tr id="logs-'+esc(uid)+'" style="display:none"><td colspan="7"><div id="logs-content-'+esc(uid)+'" class="log-container"></div></td></tr>';
+        '<tr id="logs-'+esc(uid)+'" style="display:'+(openLogs.has(uid)?'':'none')+'"><td colspan="8"><div id="logs-content-'+esc(uid)+'" class="log-container"></div></td></tr>';
     }).join('');
+    // 恢复展开的日志面板内容
+    for(const uid of openLogs){toggleLogs(uid)}
   }catch(e){console.error('loadAccounts:',e)}
 }
 
@@ -705,13 +711,29 @@ async function toggleLogs(uid){
   const row=$('#logs-'+uid);if(!row)return;
   if(row.style.display==='none'){
     row.style.display='';
-    const el=$('#logs-content-'+uid);
-    try{const d=await api('/api/account_logs?userId='+uid);
-    if(!d||d.length===0){el.innerHTML='<span style="color:var(--text-muted)">暂无日志</span>';return}
-    el.innerHTML=d.map(l=>'<div class="log-entry"><span class="log-time">'+esc(l.time.substring(11,19))+'</span><span class="log-level log-level-'+esc(l.level)+'">'+esc(l.level)+'</span><span>'+esc(l.message)+'</span></div>').join('')}
-    catch(e){el.innerHTML='<span style="color:var(--danger)">加载失败</span>'}
+    await refreshLogs(uid);
   }else{row.style.display='none'}
 }
+
+async function refreshLogs(uid){
+  const el=$('#logs-content-'+uid);if(!el)return;
+  try{const d=await api('/api/account_logs?userId='+uid);
+  if(!d||d.length===0){el.innerHTML='<span style="color:var(--text-muted)">暂无日志</span>';return}
+  const wasAtBottom=el.scrollHeight-el.scrollTop-el.clientHeight<30;
+  el.innerHTML=d.map(l=>'<div class="log-entry"><span class="log-time">'+esc(l.time.substring(11,19))+'</span><span class="log-level log-level-'+esc(l.level)+'">'+esc(l.level)+'</span><span>'+esc(l.message)+'</span></div>').join('');
+  if(wasAtBottom)el.scrollTop=el.scrollHeight}
+  catch(e){el.innerHTML='<span style="color:var(--danger)">加载失败</span>'}
+}
+
+// 定期刷新已展开的日志面板
+setInterval(()=>{
+  $$('#accounts tr[id^="logs-"]').forEach(r=>{
+    if(r.style.display!=='none'){
+      const uid=r.id.replace('logs-','');
+      refreshLogs(uid);
+    }
+  });
+},10000);
 
 // Logout
 async function logout(){await api('/api/auth/logout',{method:'POST'});location.reload()}

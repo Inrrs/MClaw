@@ -290,6 +290,12 @@ func (m *AccountManager) handleAddUser(account *Account) {
 func (m *AccountManager) tick() {
 	current := m.getCurrentAccount()
 
+	// 已有创建/切换任务在执行，跳过本轮
+	if atomic.LoadInt32(&m.creating) == 1 {
+		slog.Debug("已有创建任务在执行，tick 跳过")
+		return
+	}
+
 	if current == nil {
 		go m.tryCreateAndConnect()
 		return
@@ -298,6 +304,13 @@ func (m *AccountManager) tick() {
 	m.mu.RLock()
 	status := m.statuses[current.UserID]
 	m.mu.RUnlock()
+
+	// 当前账号在冷却中（创建失败后 4 小时内），不要反复尝试切换
+	if status != nil && !status.LastFailTime.IsZero() && time.Since(status.LastFailTime) < 4*time.Hour {
+		remain := int(4*time.Hour.Seconds() - time.Since(status.LastFailTime).Seconds())
+		slog.Debug("当前账号在冷却中，跳过切换", "userId", current.UserID, "冷却剩余", remain)
+		return
+	}
 
 	if status == nil || status.Status != "AVAILABLE" {
 		slog.Warn("当前账号不可用，切换", "userId", current.UserID)
