@@ -86,6 +86,15 @@ func main() {
 		} else {
 			slog.Info("代理池 URL 已保存", "url", newURL)
 		}
+	}, func(p proxy.Pool) {
+		cfg.Proxy.WhitelistUID = p.WhitelistUID
+		cfg.Proxy.WhitelistKey = p.WhitelistKey
+		cfg.Proxy.WhitelistURL = p.WhitelistURL
+		if err := cfg.Save(*configPath); err != nil {
+			slog.Error("保存白名单配置失败", "error", err)
+		} else {
+			slog.Info("白名单配置已持久化到 config.json")
+		}
 	})
 
 	poolCfg := gateway.Config{

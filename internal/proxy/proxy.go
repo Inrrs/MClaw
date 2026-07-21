@@ -36,7 +36,8 @@ type Stats struct {
 // Manager 代理管理器
 type Manager struct {
 	pool      Pool
-	saveFunc  func(url string) // 持久化回调
+	saveFunc  func(url string)            // 持久化池 URL 回调
+	saveFunc2 func(Pool)                  // 持久化完整配置回调（白名单等）
 
 	mu        sync.RWMutex
 	proxies   []string
@@ -54,11 +55,12 @@ type Manager struct {
 }
 
 // NewManager 创建代理管理器
-func NewManager(pool Pool, saveFunc func(string)) *Manager {
+func NewManager(pool Pool, saveFunc func(string), saveConfig func(Pool)) *Manager {
 	return &Manager{
-		pool:     pool,
-		saveFunc: saveFunc,
-		stopCh:   make(chan struct{}),
+		pool:      pool,
+		saveFunc:  saveFunc,
+		saveFunc2: saveConfig,
+		stopCh:    make(chan struct{}),
 	}
 }
 
@@ -502,7 +504,7 @@ func (m *Manager) EnsureWhitelist() error {
 	return m.AddToWhitelist(publicIP, "mclaw-auto")
 }
 
-// UpdateWhitelistConfig 更新白名单配置（WebUI 调用）
+// UpdateWhitelistConfig 更新白名单配置（WebUI 调用，自动持久化）
 func (m *Manager) UpdateWhitelistConfig(uid, key, whitelistURL string) {
 	m.mu.Lock()
 	m.pool.WhitelistUID = uid
@@ -510,8 +512,13 @@ func (m *Manager) UpdateWhitelistConfig(uid, key, whitelistURL string) {
 	if whitelistURL != "" {
 		m.pool.WhitelistURL = whitelistURL
 	}
+	pool := m.pool
 	m.mu.Unlock()
-	slog.Info("白名单配置已更新", "uid", uid, "url", m.pool.WhitelistURL)
+	// 持久化完整配置到 config.json
+	if m.saveFunc2 != nil {
+		m.saveFunc2(pool)
+	}
+	slog.Info("白名单配置已更新", "uid", uid, "url", pool.WhitelistURL)
 }
 
 // ParseWhitelistURL 从完整 URL 解析 uid 和 key
