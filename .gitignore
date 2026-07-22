@@ -48,3 +48,8 @@ Thumbs.db
 
 # 网关运行时生成的数据
 internal/api/data/
+
+# 镜像 tar / 压缩包（本地分发，不入库）
+mclaw-image.tar
+mclaw-image.tar.gz
+MClaw.tar.gz
