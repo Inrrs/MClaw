@@ -509,15 +509,14 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 				body = replaceModel(body, mapped)
 			}
 		}
-		// 图片请求自动降级：mimo-v2.5-pro 不支持图片，切到 mimo-v2.5
+		// 图片请求自动降级：mimo-v2.5-pro 无视觉能力，切到 mimo-v2.5（多模态）并保留图片
 		if containsImage(body) {
 			curModel := getRequestModel(body)
 			if curModel != "" && curModel != "mimo-v2.5" && curModel != "mimo-v2-flash" {
 				body = replaceModel(body, "mimo-v2.5")
 				slog.Info("图片请求自动降级", "from", curModel, "to", "mimo-v2.5")
 			}
-			// 剥离图片内容块（MIMO 不支持 image_url）
-			body = stripImages(body)
+			// mimo-v2.5 / mimo-v2-flash 支持图片，保留 image 块（不再 stripImages）
 		}
 		// ccswitch 发 Anthropic 格式到 /v1 路径，检测并转换
 		if hasAnthropicContent(body) {
@@ -866,15 +865,56 @@ func convertAnthropicToOpenAI(body []byte) []byte {
 					if len(toolCalls) > 0 { oaiMsg["tool_calls"] = toolCalls }
 					msgs = append(msgs, oaiMsg)
 				} else {
-					parts := make([]string, 0)
+					// 保留多模态：text → text 块，image → image_url 块；纯文本则拼成字符串
+					var oaiParts []any
+					hasImg := false
 					for _, b := range c {
-						if block, ok := b.(map[string]any); ok {
-							if block["type"] == "text" {
-								if t, ok := block["text"].(string); ok { parts = append(parts, t) }
+						block, ok := b.(map[string]any)
+						if !ok {
+							continue
+						}
+						switch block["type"] {
+						case "text":
+							if t, ok := block["text"].(string); ok && t != "" {
+								oaiParts = append(oaiParts, map[string]any{"type": "text", "text": t})
+							}
+						case "image":
+							// Anthropic image source → OpenAI image_url
+							src, _ := block["source"].(map[string]any)
+							if src == nil {
+								continue
+							}
+							st, _ := src["type"].(string)
+							var url string
+							switch st {
+							case "base64":
+								mt, _ := src["media_type"].(string)
+								data, _ := src["data"].(string)
+								if data != "" {
+									url = fmt.Sprintf("data:%s;base64,%s", mt, data)
+								}
+							case "url":
+								url, _ = src["url"].(string)
+							}
+							if url != "" {
+								oaiParts = append(oaiParts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+								hasImg = true
 							}
 						}
 					}
-					msgs = append(msgs, map[string]any{"role": role, "content": strings.Join(parts, "\n")})
+					if hasImg {
+						msgs = append(msgs, map[string]any{"role": role, "content": oaiParts})
+					} else {
+						var texts []string
+						for _, p := range oaiParts {
+							if pm, ok := p.(map[string]any); ok {
+								if t, ok := pm["text"].(string); ok {
+									texts = append(texts, t)
+								}
+							}
+						}
+						msgs = append(msgs, map[string]any{"role": role, "content": strings.Join(texts, "\n")})
+					}
 				}
 			default:
 				msgs = append(msgs, map[string]any{"role": role, "content": fmt.Sprintf("%v", c)})
