@@ -42,3 +42,9 @@ Thumbs.db
 # Claude Code 本地配置
 .claude/
 .mcp.json
+
+# 本地助手内存（不提交）
+.workbuddy/
+
+# 网关运行时生成的数据
+internal/api/data/

@@ -12,3 +12,13 @@ data/*.json
 .claude/
 .claude
 scripts/
+
+# 本地助手内存
+.workbuddy/
+
+# 构建产物 / 压缩包
+MClaw.tar
+MClaw.tar.gz
+
+# 网关运行时生成的数据
+internal/api/data/

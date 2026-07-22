@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -538,7 +539,9 @@ func HandleResponses(pool *gateway.NodePool) http.HandlerFunc {
 }
 
 // HandleMessages Anthropic Messages API
-// 网关做 Anthropic→OpenAI 请求转换 + 流式/非流式 OpenAI→Anthropic 响应转换
+// 网关始终做 Anthropic→OpenAI 请求转换（含模型映射与规范化）；
+// 再根据请求是否流式，将上游 OpenAI 响应转换为 Anthropic SSE 或非流式 JSON。
+// 注意：/v1/messages 与 /anthropic/v1/messages 都是 Anthropic 端点，必须转换。
 func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := readBody(r)
@@ -546,24 +549,27 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		isAnthropic := strings.Contains(r.URL.Path, "/anthropic/")
-		if isAnthropic {
-			body = convertAnthropicToOpenAI(body)
+		// 1) Anthropic → OpenAI 请求转换（含模型映射 / 规范化）
+		oaiBody := prepareRequest(convertAnthropicToOpenAI(body), true)
+
+		// 2) 根据是否流式选择 Anthropic 响应转换方式
+		if isStreamRequest(oaiBody) {
 			if f, ok := w.(http.Flusher); ok {
 				rw := &anthropicResponseWriter{ResponseWriter: w, flusher: f, reqID: time.Now().UnixNano()}
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("Cache-Control", "no-cache")
 				w.Header().Set("Connection", "keep-alive")
-				handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, body)
-			} else {
-				// 无法 flush，退回非流式转换
-				rw := &anthropicBufWriter{ResponseWriter: w}
-				handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, body)
-				rw.flush()
+				w.Header().Set("X-Accel-Buffering", "no")
+				handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, oaiBody)
+				return
 			}
-		} else {
-			handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, w, body)
+			// 不支持 flush：降级为非流式转换（仍返回 Anthropic 格式）
+			slog.Warn("环境不支持 HTTP flush，Anthropic 流式请求降级为非流式", "path", r.URL.Path)
 		}
+		// 非流式（或流式但无法 flush 时的兜底）
+		rw := &anthropicBufWriter{ResponseWriter: w}
+		handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, oaiBody)
+		rw.flush()
 	}
 }
 
@@ -1071,6 +1077,8 @@ func handleStreamResponse(ctx context.Context, w http.ResponseWriter, pending *g
 
 	// 累积最近的 chunk 用于提取 token 用量
 	var chunkBuffer [][]byte
+	// SSE 规范化解析器：跨 chunk 边界重组事件，避免重复 data: 前缀
+	sseParser := &sseStreamParser{}
 
 	for {
 		select {
@@ -1088,26 +1096,32 @@ func handleStreamResponse(ctx context.Context, w http.ResponseWriter, pending *g
 				if msg.Status != 0 && msg.Status != 200 {
 					slog.Warn("上游返回非200状态码", "status", msg.Status, "node", node.ID)
 				}
-			case "chunk":
-				if msg.Body != nil {
-					body := unwrapJSON(msg.Body)
-					// 首个 chunk 记录错误详情
-					if len(chunkBuffer) == 0 {
+		case "chunk":
+			if msg.Body != nil {
+				raw := msg.Body
+				// 规范化上游 SSE：剥离重复 data: 前缀 / 重组被切分的事件
+				payloads := sseParser.push(raw)
+				// 首个有效 payload 记录错误详情
+				if len(chunkBuffer) == 0 {
+					for _, pl := range payloads {
 						var errCheck map[string]any
-						if json.Unmarshal(body, &errCheck) == nil {
+						if json.Unmarshal(pl, &errCheck) == nil {
 							if e, ok := errCheck["error"]; ok {
 								errJSON, _ := json.Marshal(e)
 								slog.Debug("上游错误详情", "body", string(errJSON))
 							}
 						}
 					}
-					chunkBuffer = append(chunkBuffer, body)
-					if len(chunkBuffer) > 20 {
-						chunkBuffer = chunkBuffer[len(chunkBuffer)-20:]
-					}
-					fmt.Fprintf(w, "data: %s\n\n", sanitizeUTF8(body))
 				}
-				flusher.Flush()
+				chunkBuffer = append(chunkBuffer, unwrapJSON(raw))
+				if len(chunkBuffer) > 20 {
+					chunkBuffer = chunkBuffer[len(chunkBuffer)-20:]
+				}
+				for _, pl := range payloads {
+					fmt.Fprintf(w, "data: %s\n\n", sanitizeUTF8(pl))
+				}
+			}
+			flusher.Flush()
 			case "finish":
 				// 提取 token 用量
 				usage := extractUsageFromChunks(chunkBuffer)
@@ -1269,4 +1283,54 @@ func unwrapJSON(b []byte) []byte {
 		return b
 	}
 	return []byte(s)
+}
+
+// sseStreamParser 跨 chunk 边界重组 SSE 事件，提取每个事件的 JSON 负载，
+// 避免上游已带 data: 前缀时网关再次包裹导致的重复前缀 / 事件被切分问题。
+type sseStreamParser struct {
+	buf []byte
+}
+
+// push 接收上游原始字节，返回本次可下发的规范化 data 负载（JSON 字节）
+func (p *sseStreamParser) push(data []byte) [][]byte {
+	p.buf = append(p.buf, data...)
+	var out [][]byte
+	for {
+		idx := bytes.Index(p.buf, []byte("\n\n"))
+		if idx < 0 {
+			idx = bytes.Index(p.buf, []byte("\r\n\r\n"))
+			if idx < 0 {
+				break
+			}
+		}
+		event := p.buf[:idx]
+		p.buf = p.buf[idx+2:]
+		if payload := extractSSEPayload(event); payload != nil {
+			out = append(out, payload)
+		}
+	}
+	return out
+}
+
+// extractSSEPayload 从单个 SSE 事件文本中提取 JSON 负载：
+// 优先取 data: 行内容；若整段是自包含 JSON（上游未加 data: 前缀），直接采用。
+func extractSSEPayload(event []byte) []byte {
+	text := strings.TrimRight(string(event), "\r\n")
+	var dataLines []string
+	for _, ln := range strings.Split(text, "\n") {
+		ln = strings.TrimRight(ln, "\r")
+		if strings.HasPrefix(ln, "data:") {
+			v := strings.TrimPrefix(ln, "data:")
+			v = strings.TrimPrefix(v, " ")
+			dataLines = append(dataLines, v)
+		}
+	}
+	if len(dataLines) > 0 {
+		return []byte(strings.Join(dataLines, "\n"))
+	}
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		return []byte(trimmed)
+	}
+	return nil
 }
