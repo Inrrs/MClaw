@@ -127,7 +127,7 @@ func containsImage(body []byte) bool {
 		strings.Contains(s, `"type": "image"`)
 }
 
-// hasAnthropicContent 检测请求体是否含 Anthropic 格式内容（tool_use/tool_result 块或 system 字段）
+// hasAnthropicContent 检测请求体是否含 Anthropic 格式内容（tool_use/tool_result/thinking 块或 system 字段）
 func hasAnthropicContent(body []byte) bool {
 	var reqMap map[string]any
 	if err := json.Unmarshal(body, &reqMap); err != nil {
@@ -152,7 +152,7 @@ func hasAnthropicContent(body []byte) bool {
 		for _, p := range content {
 			if part, ok := p.(map[string]any); ok {
 				t, _ := part["type"].(string)
-				if t == "tool_use" || t == "tool_result" {
+				if t == "tool_use" || t == "tool_result" || t == "thinking" {
 					return true
 				}
 			}
@@ -517,10 +517,12 @@ func (w *anthropicBufWriter) Write(b []byte) (int, error) {
 	w.buf = append(w.buf, b...)
 	return len(b), nil
 }
+func (w *anthropicBufWriter) Flush() {}
 func (w *anthropicBufWriter) flush() {
 	if len(w.buf) == 0 { return }
+	converted := convertOpenAIToAnthropic(w.buf)
 	w.ResponseWriter.Header().Set("Content-Type", "application/json")
-	w.ResponseWriter.Write(convertOpenAIToAnthropic(w.buf))
+	w.ResponseWriter.Write(converted)
 }
 
 // anthropicResponseWriter 包装 ResponseWriter，流式拦截 OpenAI SSE chunks 转为 Anthropic SSE
@@ -638,28 +640,35 @@ func (w *anthropicResponseWriter) convertChunk(chunk map[string]any) {
 				"delta":  map[string]any{"type": "text_delta", "text": text},
 			})
 		}
-		// tool_use
+		// tool_use - track indices dynamically
 		if tcDelta, ok := delta["tool_calls"].([]any); ok && len(tcDelta) > 0 {
+			// 计算 base index：thinking(0) + text(1 if present) + tool offset
+			baseIdx := 0
+			if w.thSeen { baseIdx++ }
+			if w.coSeen { baseIdx++ }
 			for _, tc := range tcDelta {
 				tcMap, ok := tc.(map[string]any)
 				if !ok { continue }
-				idx := int(tcMap["index"].(float64))
+				idx := baseIdx
+				if i, ok := tcMap["index"].(float64); ok { idx = baseIdx + int(i) }
 				fn, _ := tcMap["function"].(map[string]any)
 				if fn == nil { continue }
-				if args, ok := fn["arguments"].(string); ok && args != "" {
-					var inp any
-					if err := json.Unmarshal([]byte(args), &inp); err != nil {
-						inp = map[string]any{"raw": args}
-					}
-					w.sse("content_block_delta", map[string]any{
-						"index": 2 + idx,
-						"delta": map[string]any{"type": "input_json_delta", "partial_json": string(mustMarshal(inp))},
+				name, _ := fn["name"].(string)
+				if name != "" {
+					w.sse("content_block_start", map[string]any{
+						"index": idx,
+						"content_block": map[string]any{"type": "tool_use", "id": tcMap["id"], "name": name, "input": map[string]any{}},
 					})
 				}
-				if name, ok := fn["name"].(string); ok && name != "" {
-					w.sse("content_block_start", map[string]any{
-						"index": 2 + idx,
-						"content_block": map[string]any{"type": "tool_use", "id": tcMap["id"], "name": name, "input": map[string]any{}},
+				args, _ := fn["arguments"].(string)
+				if args != "" {
+					var inp any
+					if err := json.Unmarshal([]byte(args), &inp); err != nil {
+						inp = args
+					}
+					w.sse("content_block_delta", map[string]any{
+						"index": idx,
+						"delta": map[string]any{"type": "input_json_delta", "partial_json": string(mustMarshal(inp))},
 					})
 				}
 			}
