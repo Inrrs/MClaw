@@ -549,13 +549,9 @@ func (m *AccountManager) doCreateAndConnect() {
 
 		if status == "NOT_CREATED" || status == "CREATE_FAILED" || status == "DESTROYED" || remainSec <= 0 {
 			LogAccountInfo(account.UserID, "尝试创建容器")
-			if m.tryCreateForAccount(account) {
-				// 创建+注入成功，切换完成
-				return
-			}
-			// 创建失败，继续尝试下一个账号
-			LogAccountWarn(account.UserID, "创建/注入失败，尝试下一个账号")
-			continue
+			m.tryCreateForAccount(account)
+			// 无论成功失败，只尝试一个账号，等下一轮 tick 再决定
+			return
 		}
 
 		LogAccountInfo(account.UserID, "状态 %s，跳过", status)
@@ -871,6 +867,9 @@ func (m *AccountManager) setCurrentAccount(userID string, remainSec int) {
 		status.RemainSec = remainSec
 		status.ExpireTime = time.Now().Add(time.Duration(remainSec) * time.Second)
 	}
+
+	// 清理非当前账号的旧节点（防止请求路由到过期 bridge）
+	m.pool.RemoveOtherThan(userID)
 
 	// 在锁内计算指标（避免调用 updateMetrics 导致 RLock 死锁）
 	total := len(m.accounts)

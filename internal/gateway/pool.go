@@ -228,6 +228,17 @@ func (p *NodePool) Remove(id string) {
 	}
 }
 
+// RemoveOtherThan 移除不属于 keepID 的所有节点（切换账号时清理旧 bridge）
+func (p *NodePool) RemoveOtherThan(keepID string) {
+	p.nodes.Range(func(key, value any) bool {
+		id := key.(string)
+		if id != keepID {
+			p.Remove(id)
+		}
+		return true
+	})
+}
+
 // countNodes 统计节点数量
 func (p *NodePool) countNodes() (total int, available int) {
 	p.nodes.Range(func(_, v any) bool {
