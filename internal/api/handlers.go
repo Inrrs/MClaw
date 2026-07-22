@@ -440,7 +440,8 @@ func HandleResponses(pool *gateway.NodePool) http.HandlerFunc {
 }
 
 // HandleMessages Anthropic Messages API
-// bridge_fallback.py 已有完整 Anthropic↔OpenAI 转换，网关只做透传
+// 网关做 Anthropic→OpenAI 请求转换 + OpenAI→Anthropic 响应转换
+// bridge 只做纯透传（对标 mimi3 极简 bridge）
 func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := readBody(r)
@@ -448,9 +449,252 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		// 保留原始路径，bridge 根据 path 判断格式并转换
-		handleProxyRequest(r.Context(), pool, r.URL.Path, true, w, body)
+		isAnthropic := strings.Contains(r.URL.Path, "/anthropic/")
+		if isAnthropic {
+			body = convertAnthropicToOpenAI(body)
+			rw := &anthropicResponseWriter{ResponseWriter: w}
+			handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, body)
+			rw.flush()
+		} else {
+			handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, w, body)
+		}
 	}
+}
+
+// anthropicResponseWriter 包装 ResponseWriter，拦截写入做 OpenAI→Anthropic 响应转换
+type anthropicResponseWriter struct {
+	http.ResponseWriter
+	buf []byte
+}
+
+func (w *anthropicResponseWriter) Write(b []byte) (int, error) {
+	w.buf = append(w.buf, b...)
+	return len(b), nil
+}
+
+func (w *anthropicResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *anthropicResponseWriter) flush() {
+	if len(w.buf) == 0 {
+		return
+	}
+	converted := convertOpenAIToAnthropic(w.buf)
+	w.ResponseWriter.Header().Set("Content-Type", "application/json")
+	w.ResponseWriter.Write(converted)
+}
+
+// convertAnthropicToOpenAI 将 Anthropic Messages 格式转为 OpenAI Chat Completions 格式
+func convertAnthropicToOpenAI(body []byte) []byte {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	result := make(map[string]any)
+	if model, ok := req["model"].(string); ok { result["model"] = model }
+	if stream, ok := req["stream"].(bool); ok { result["stream"] = stream }
+	if mt, ok := req["max_tokens"].(float64); ok && mt >= 100 {
+		if mt > 16384 { mt = 16384 }
+		result["max_tokens"] = int(mt)
+	} else {
+		result["max_tokens"] = 4096
+	}
+
+	// messages
+	msgs := make([]map[string]any, 0)
+	if sys, ok := req["system"]; ok && sys != nil {
+		sysText := ""
+		switch s := sys.(type) {
+		case string: sysText = s
+		case []any:
+			parts := make([]string, 0)
+			for _, b := range s {
+				if block, ok := b.(map[string]any); ok {
+					if t, ok := block["text"].(string); ok { parts = append(parts, t) }
+				}
+			}
+			sysText = strings.Join(parts, " ")
+		}
+		if sysText != "" { msgs = append(msgs, map[string]any{"role": "system", "content": sysText}) }
+	}
+	if messages, ok := req["messages"].([]any); ok {
+		for _, m := range messages {
+			msg, ok := m.(map[string]any)
+			if !ok { continue }
+			role, _ := msg["role"].(string)
+			content := msg["content"]
+			switch c := content.(type) {
+			case string:
+				msgs = append(msgs, map[string]any{"role": role, "content": c})
+			case []any:
+				hasToolUse := false
+				hasToolResult := false
+				for _, b := range c {
+					if block, ok := b.(map[string]any); ok {
+						switch block["type"] {
+						case "tool_use": hasToolUse = true
+						case "tool_result": hasToolResult = true
+						}
+					}
+				}
+				if hasToolResult {
+					for _, b := range c {
+						if block, ok := b.(map[string]any); ok && block["type"] == "tool_result" {
+							rc := ""
+							switch r := block["content"].(type) {
+							case string: rc = r
+							case []any:
+								parts := make([]string, 0)
+								for _, rb := range r {
+									if rbMap, ok := rb.(map[string]any); ok {
+										if t, ok := rbMap["text"].(string); ok { parts = append(parts, t) }
+									}
+								}
+								rc = strings.Join(parts, "\n")
+							}
+							toolCallID, _ := block["tool_use_id"].(string)
+							msgs = append(msgs, map[string]any{"role": "tool", "tool_call_id": toolCallID, "content": rc})
+						}
+					}
+				} else if hasToolUse {
+					textParts := make([]string, 0)
+					toolCalls := make([]map[string]any, 0)
+					for _, b := range c {
+						if block, ok := b.(map[string]any); ok {
+							switch block["type"] {
+							case "text":
+								if t, ok := block["text"].(string); ok { textParts = append(textParts, t) }
+							case "tool_use":
+								inputJSON, _ := json.Marshal(block["input"])
+								toolCalls = append(toolCalls, map[string]any{
+									"id":   block["id"],
+									"type": "function",
+									"function": map[string]any{"name": block["name"], "arguments": string(inputJSON)},
+								})
+							}
+						}
+					}
+					oaiMsg := map[string]any{"role": "assistant"}
+					if len(textParts) > 0 { oaiMsg["content"] = strings.Join(textParts, "\n") }
+					if len(toolCalls) > 0 { oaiMsg["tool_calls"] = toolCalls }
+					msgs = append(msgs, oaiMsg)
+				} else {
+					parts := make([]string, 0)
+					for _, b := range c {
+						if block, ok := b.(map[string]any); ok {
+							if block["type"] == "text" {
+								if t, ok := block["text"].(string); ok { parts = append(parts, t) }
+							}
+						}
+					}
+					msgs = append(msgs, map[string]any{"role": role, "content": strings.Join(parts, "\n")})
+				}
+			default:
+				msgs = append(msgs, map[string]any{"role": role, "content": fmt.Sprintf("%v", c)})
+			}
+		}
+	}
+	result["messages"] = msgs
+
+	// tools
+	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
+		oaiTools := make([]map[string]any, 0, len(tools))
+		for _, t := range tools {
+			tool, ok := t.(map[string]any)
+			if !ok { continue }
+			if tool["type"] == "function" { oaiTools = append(oaiTools, tool); continue }
+			fn := map[string]any{"name": tool["name"], "description": tool["description"]}
+			if schema, ok := tool["input_schema"]; ok { fn["parameters"] = schema }
+			oaiTools = append(oaiTools, map[string]any{"type": "function", "function": fn})
+		}
+		if len(oaiTools) > 0 { result["tools"] = oaiTools }
+	}
+
+	// tool_choice
+	if tc, ok := req["tool_choice"]; ok {
+		switch v := tc.(type) {
+		case map[string]any:
+			switch v["type"] {
+			case "auto": result["tool_choice"] = "auto"
+			case "any": result["tool_choice"] = "required"
+			case "tool":
+				if name, ok := v["name"].(string); ok {
+					result["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": name}}
+				}
+			}
+		case string: result["tool_choice"] = v
+		}
+	}
+
+	out, err := json.Marshal(result)
+	if err != nil { return body }
+	return out
+}
+
+// convertOpenAIToAnthropic 将 OpenAI Chat Completion 响应转为 Anthropic Messages 格式
+func convertOpenAIToAnthropic(body []byte) []byte {
+	var oai map[string]any
+	if err := json.Unmarshal(body, &oai); err != nil { return body }
+	choices, ok := oai["choices"].([]any)
+	if !ok || len(choices) == 0 { return body }
+	choice, ok := choices[0].(map[string]any)
+	if !ok { return body }
+	msg, ok := choice["message"].(map[string]any)
+	if !ok { return body }
+
+	blocks := make([]map[string]any, 0)
+	if rt, ok := msg["reasoning_content"].(string); ok && rt != "" {
+		blocks = append(blocks, map[string]any{"type": "thinking", "thinking": rt})
+	}
+	if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 {
+		for _, tc := range tcs {
+			tcMap, ok := tc.(map[string]any)
+			if !ok { continue }
+			fn, _ := tcMap["function"].(map[string]any)
+			if fn == nil { continue }
+			var inp any
+			argsStr, _ := fn["arguments"].(string)
+			if err := json.Unmarshal([]byte(argsStr), &inp); err != nil {
+				inp = map[string]any{"raw": argsStr}
+			}
+			blocks = append(blocks, map[string]any{"type": "tool_use", "id": tcMap["id"], "name": fn["name"], "input": inp})
+		}
+	} else if content, ok := msg["content"].(string); ok && content != "" {
+		blocks = append(blocks, map[string]any{"type": "text", "text": content})
+	} else {
+		blocks = append(blocks, map[string]any{"type": "text", "text": ""})
+	}
+
+	sr := "end_turn"
+	if fr, ok := choice["finish_reason"].(string); ok {
+		switch fr {
+		case "tool_calls": sr = "tool_use"
+		case "length": sr = "max_tokens"
+		case "stop": sr = "end_turn"
+		default: sr = fr
+		}
+	}
+	model, _ := oai["model"].(string)
+	if model == "" { model = "mimo-v2.5-pro" }
+	usage, _ := oai["usage"].(map[string]any)
+	inputTokens, outputTokens := 0, 0
+	if usage != nil {
+		if v, ok := usage["prompt_tokens"].(float64); ok { inputTokens = int(v) }
+		if v, ok := usage["completion_tokens"].(float64); ok { outputTokens = int(v) }
+	}
+
+	result := map[string]any{
+		"id": fmt.Sprintf("msg_%x", time.Now().UnixNano())[:16+len("msg_")],
+		"type": "message", "role": "assistant", "content": blocks,
+		"model": model, "stop_reason": sr, "stop_sequence": nil,
+		"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens},
+	}
+	out, err := json.Marshal(result)
+	if err != nil { return body }
+	return out
 }
 
 // HandleModels 模型列表
