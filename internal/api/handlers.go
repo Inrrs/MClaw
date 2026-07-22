@@ -1098,7 +1098,9 @@ func handleStreamResponse(ctx context.Context, w http.ResponseWriter, pending *g
 				}
 		case "chunk":
 			if msg.Body != nil {
-				raw := msg.Body
+				// bridge 以 json.dumps 发送，body 是 JSON 字符串字面量（换行被转义为 \n），
+				// 必须先 unwrapJSON 解包成真实 SSE 文本，否则 sseParser 按真实 \n\n 切分会全部缓冲丢弃。
+				raw := unwrapJSON(msg.Body)
 				// 规范化上游 SSE：剥离重复 data: 前缀 / 重组被切分的事件
 				payloads := sseParser.push(raw)
 				// 首个有效 payload 记录错误详情
@@ -1113,7 +1115,7 @@ func handleStreamResponse(ctx context.Context, w http.ResponseWriter, pending *g
 						}
 					}
 				}
-				chunkBuffer = append(chunkBuffer, unwrapJSON(raw))
+				chunkBuffer = append(chunkBuffer, raw)
 				if len(chunkBuffer) > 20 {
 					chunkBuffer = chunkBuffer[len(chunkBuffer)-20:]
 				}
@@ -1122,9 +1124,13 @@ func handleStreamResponse(ctx context.Context, w http.ResponseWriter, pending *g
 				}
 			}
 			flusher.Flush()
-			case "finish":
-				// 提取 token 用量
-				usage := extractUsageFromChunks(chunkBuffer)
+		case "finish":
+			// 冲刷解析器中可能残留的事件（上游末尾未带 \n\n 边界时）
+			if rem := sseParser.flush(); rem != nil {
+				fmt.Fprintf(w, "data: %s\n\n", sanitizeUTF8(rem))
+			}
+			// 提取 token 用量
+			usage := extractUsageFromChunks(chunkBuffer)
 				metrics.Get().RecordRequest(true, usage, 0)
 				if usage.InputTokens > 0 || usage.OutputTokens > 0 {
 					slog.Debug("流式 token 用量", "input", usage.InputTokens, "output", usage.OutputTokens, "cache", usage.CacheTokens)
@@ -1310,6 +1316,16 @@ func (p *sseStreamParser) push(data []byte) [][]byte {
 		}
 	}
 	return out
+}
+
+// flush 冲刷缓冲区中残留的未结束事件（上游末尾未带 \n\n 边界时调用）
+func (p *sseStreamParser) flush() []byte {
+	if len(p.buf) == 0 {
+		return nil
+	}
+	remaining := p.buf
+	p.buf = nil
+	return extractSSEPayload(remaining)
 }
 
 // extractSSEPayload 从单个 SSE 事件文本中提取 JSON 负载：
