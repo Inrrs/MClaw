@@ -127,6 +127,63 @@ func containsImage(body []byte) bool {
 		strings.Contains(s, `"type": "image"`)
 }
 
+// stripImages 从 messages 的 content 数组中剥离 image_url/image 块，保留文字
+// MIMO API 不支持图片，直接发送含图片的请求会返回 400
+func stripImages(body []byte) []byte {
+	var reqMap map[string]any
+	if err := json.Unmarshal(body, &reqMap); err != nil {
+		return body
+	}
+	msgs, ok := reqMap["messages"].([]any)
+	if !ok {
+		return body
+	}
+	changed := false
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := msg["content"]
+		if !ok {
+			continue
+		}
+		c, ok := content.([]any)
+		if !ok {
+			continue
+		}
+		var filtered []any
+		for _, block := range c {
+			b, ok := block.(map[string]any)
+			if !ok {
+				filtered = append(filtered, block)
+				continue
+			}
+			t, _ := b["type"].(string)
+			if t == "image_url" || t == "image" {
+				changed = true
+				continue
+			}
+			filtered = append(filtered, block)
+		}
+		if changed {
+			if len(filtered) == 0 {
+				msg["content"] = "[图片已剥离]"
+			} else {
+				msg["content"] = filtered
+			}
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(reqMap)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // hasAnthropicContent 检测请求体是否含 Anthropic 格式内容（tool_use/tool_result/thinking 块或 system 字段）
 func hasAnthropicContent(body []byte) bool {
 	var reqMap map[string]any
@@ -458,6 +515,8 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 				body = replaceModel(body, "mimo-v2.5")
 				slog.Info("图片请求自动降级", "from", curModel, "to", "mimo-v2.5")
 			}
+			// 剥离图片内容块（MIMO 不支持 image_url）
+			body = stripImages(body)
 		}
 		// ccswitch 发 Anthropic 格式到 /v1 路径，检测并转换
 		if hasAnthropicContent(body) {

@@ -36,7 +36,7 @@ async def safe_send(ws, lock, data):
 def inject_system(body_str):
     """OpenAI 请求：注入 system prompt（仅 mimo-v2.5-pro）"""
     try: d = json.loads(body_str)
-    except: return body_str
+    except Exception: return body_str
     model = d.get("model", "")
     if model and "mimo-v2.5-pro" not in model:
         return body_str
@@ -78,7 +78,7 @@ async def sync_models(ws, client, lock):
             ids = [m.get("id","") for m in r.json().get("data",[])]
             await safe_send(ws, lock, {"req_id":"__models__","type":"models","body":ids})
             log(f"models: {len(ids)}")
-    except: pass
+    except Exception: pass
 
 async def main():
     _placeholder = "__" + "WS_URL" + "__"
@@ -102,7 +102,7 @@ async def main():
                             data = json.loads(raw.decode("utf-8", errors="replace"))
                             asyncio.create_task(handle_request(ws, data, client, lock))
                         except websockets.exceptions.ConnectionClosed: log("WS closed"); break
-                        except: pass
+                        except Exception as e: log(f"recv err: {e}")
             except Exception as e: log(f"WS err: {type(e).__name__}: {e}")
             await asyncio.sleep(3)
 
