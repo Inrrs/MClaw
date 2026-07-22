@@ -551,9 +551,12 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
-		// 1) Anthropic → OpenAI 请求转换（含模型映射 / 规范化）
-		//    再把客户端 system 合并进首条 user（MIMO 仅接受 bridge 注入的固定 system 前缀）
-		oaiBody := prepareRequest(mergeSystemIntoUser(convertAnthropicToOpenAI(body)), true)
+		// 1) Anthropic → OpenAI 请求转换
+		oaiBody := convertAnthropicToOpenAI(body)
+		// 2) 模型映射 + 规范化（先映射，便于按映射后的模型决定 system 处理）
+		oaiBody = prepareRequest(oaiBody, true)
+		// 3) 仅 mimo-v2.5-pro 合并 system 到 user（MIMO pro 仅接受 bridge 注入的固定前缀）
+		oaiBody = mergeSystemIntoUser(oaiBody)
 
 		// 2) 根据是否流式选择 Anthropic 响应转换方式
 		if isStreamRequest(oaiBody) {
@@ -978,13 +981,17 @@ func convertOpenAIToAnthropic(body []byte) []byte {
 	return out
 }
 
-// mergeSystemIntoUser 把所有 role:system 消息的文本合并进第一条 user 消息。
-// MIMO/OpenClaw 仅接受固定的 system 前缀（由 bridge 注入 "You are a personal assistant running inside OpenClaw."），
-// 客户端自定义 system 会被拒（400 Param Incorrect）。因此把客户端 system 文本前置到第一条 user 消息，
-// 让 bridge 注入合法前缀，同时保留客户端指令。
+// mergeSystemIntoUser 仅对 mimo-v2.5-pro：把所有 role:system 消息文本合并进首条 user 消息。
+// MIMO/OpenClaw 的 pro 模型仅接受固定 system 前缀（bridge 注入 "You are a personal assistant running inside OpenClaw."），
+// 客户端自定义 system 会被拒（400 Param Incorrect）。合并进 user 后 bridge 注入合法前缀，客户端指令作为 user 保留。
+// 其他模型（mimo-v2.5 / mimo-v2-flash 等）接受自定义 system，无需合并，原样保留。
 func mergeSystemIntoUser(body []byte) []byte {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	model, _ := req["model"].(string)
+	if !strings.Contains(model, "mimo-v2.5-pro") {
 		return body
 	}
 	msgs, ok := req["messages"].([]any)
