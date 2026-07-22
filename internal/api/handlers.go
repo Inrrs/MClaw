@@ -1021,17 +1021,14 @@ func convertOpenAIToAnthropic(body []byte) []byte {
 	return out
 }
 
-// mergeSystemIntoUser 仅对 mimo-v2.5-pro：把所有 role:system 消息文本合并进首条 user 消息。
-// MIMO/OpenClaw 的 pro 模型仅接受固定 system 前缀（bridge 注入 "You are a personal assistant running inside OpenClaw."），
-// 客户端自定义 system 会被拒（400 Param Incorrect）。合并进 user 后 bridge 注入合法前缀，客户端指令作为 user 保留。
-// 其他模型（mimo-v2.5 / mimo-v2-flash 等）接受自定义 system，无需合并，原样保留。
+// mergeSystemIntoUser 把所有 role:system 消息文本合并进首条 user 消息（对所有模型生效）。
+// MIMO 所有模型都拒绝 role:system（pro 仅接受 bridge 注入的固定前缀，non-pro 连前缀也拒），
+// 客户端自定义 system 会被拒（400 Param Incorrect）。合并进 user 后：
+//   - pro：bridge 见无 system → 注入合法前缀，客户端 system 作为 user 保留
+//   - non-pro：无 system，客户端 system 作为 user 保留
 func mergeSystemIntoUser(body []byte) []byte {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
-		return body
-	}
-	model, _ := req["model"].(string)
-	if !strings.Contains(model, "mimo-v2.5-pro") {
 		return body
 	}
 	msgs, ok := req["messages"].([]any)
