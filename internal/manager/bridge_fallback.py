@@ -16,7 +16,7 @@ def _load_mimo_config():
             if b.startswith("${"): b = os.path.expandvars(b)
             b = b.rstrip("/v1")
             if k and b: return k, b
-        except: continue
+        except Exception: continue
     return "", ""
 
 _cfg_key, _cfg_base = _load_mimo_config()
@@ -31,7 +31,7 @@ def log(msg):
 async def safe_send(ws, lock, data):
     try:
         async with lock: await ws.send(json.dumps(data, ensure_ascii=True))
-    except: pass
+    except Exception as e: log(f"send err: {e}")
 
 def inject_system(body_str):
     """OpenAI 请求：注入 system prompt（仅 mimo-v2.5-pro）"""

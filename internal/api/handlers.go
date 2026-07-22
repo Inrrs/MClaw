@@ -127,6 +127,40 @@ func containsImage(body []byte) bool {
 		strings.Contains(s, `"type": "image"`)
 }
 
+// hasAnthropicContent 检测请求体是否含 Anthropic 格式内容（tool_use/tool_result 块或 system 字段）
+func hasAnthropicContent(body []byte) bool {
+	var reqMap map[string]any
+	if err := json.Unmarshal(body, &reqMap); err != nil {
+		return false
+	}
+	if _, ok := reqMap["system"]; ok {
+		return true
+	}
+	msgs, ok := reqMap["messages"].([]any)
+	if !ok {
+		return false
+	}
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, p := range content {
+			if part, ok := p.(map[string]any); ok {
+				t, _ := part["type"].(string)
+				if t == "tool_use" || t == "tool_result" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // isStreamRequest 检测是否为流式请求
 func isStreamRequest(body []byte) bool {
 	var req struct {
@@ -400,7 +434,8 @@ func handleProxyRequest(ctx context.Context, pool *gateway.NodePool, path string
 }
 
 // HandleChatCompletions OpenAI Chat Completions
-// bridge_fallback.py 处理 system prompt 注入和格式转换，网关只做模型映射
+// 标准 OpenAI 客户端（WorkBuddy 等）：直接透传
+// ccswitch（Claude Code）发 Anthropic 格式到 /v1：检测并转换
 func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := readBody(r)
@@ -417,13 +452,17 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 			}
 		}
 		// 图片请求自动降级：mimo-v2.5-pro 不支持图片，切到 mimo-v2.5
-		// bridge 已修：mimo-v2.5 不注入 system prompt，不会 400
 		if containsImage(body) {
 			curModel := getRequestModel(body)
 			if curModel != "" && curModel != "mimo-v2.5" && curModel != "mimo-v2-flash" {
 				body = replaceModel(body, "mimo-v2.5")
 				slog.Info("图片请求自动降级", "from", curModel, "to", "mimo-v2.5")
 			}
+		}
+		// ccswitch 发 Anthropic 格式到 /v1 路径，检测并转换
+		if hasAnthropicContent(body) {
+			slog.Debug("检测到 Anthropic 格式内容，自动转换")
+			body = convertAnthropicToOpenAI(body)
 		}
 		handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, w, body)
 	}
@@ -440,8 +479,7 @@ func HandleResponses(pool *gateway.NodePool) http.HandlerFunc {
 }
 
 // HandleMessages Anthropic Messages API
-// 网关做 Anthropic→OpenAI 请求转换 + OpenAI→Anthropic 响应转换
-// bridge 只做纯透传（对标 mimi3 极简 bridge）
+// 网关做 Anthropic→OpenAI 请求转换 + 流式/非流式 OpenAI→Anthropic 响应转换
 func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := readBody(r)
@@ -452,42 +490,208 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 		isAnthropic := strings.Contains(r.URL.Path, "/anthropic/")
 		if isAnthropic {
 			body = convertAnthropicToOpenAI(body)
-			rw := &anthropicResponseWriter{ResponseWriter: w}
-			handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, body)
-			rw.flush()
+			if f, ok := w.(http.Flusher); ok {
+				rw := &anthropicResponseWriter{ResponseWriter: w, flusher: f, reqID: time.Now().UnixNano()}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, body)
+			} else {
+				// 无法 flush，退回非流式转换
+				rw := &anthropicBufWriter{ResponseWriter: w}
+				handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, rw, body)
+				rw.flush()
+			}
 		} else {
 			handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, w, body)
 		}
 	}
 }
 
-// anthropicResponseWriter 包装 ResponseWriter，拦截写入做 OpenAI→Anthropic 响应转换
-type anthropicResponseWriter struct {
+// anthropicBufWriter 非流式兜底：缓冲全部响应后一次性转换
+type anthropicBufWriter struct {
 	http.ResponseWriter
 	buf []byte
 }
-
-func (w *anthropicResponseWriter) Write(b []byte) (int, error) {
+func (w *anthropicBufWriter) Write(b []byte) (int, error) {
 	w.buf = append(w.buf, b...)
 	return len(b), nil
 }
+func (w *anthropicBufWriter) flush() {
+	if len(w.buf) == 0 { return }
+	w.ResponseWriter.Header().Set("Content-Type", "application/json")
+	w.ResponseWriter.Write(convertOpenAIToAnthropic(w.buf))
+}
+
+// anthropicResponseWriter 包装 ResponseWriter，流式拦截 OpenAI SSE chunks 转为 Anthropic SSE
+type anthropicResponseWriter struct {
+	http.ResponseWriter
+	flusher http.Flusher
+	reqID   int64 // 用于生成 Anthropic message ID
+	msgSent bool  // 是否已发送 message_start
+	thSeen  bool  // 是否已开启 thinking block
+	coSeen  bool  // 是否已开启 content block
+	thIdx   int
+	coIdx   int
+	outBuf  []byte // 累积输出内容
+}
 
 func (w *anthropicResponseWriter) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
+	if w.flusher != nil {
+		w.flusher.Flush()
 	}
 }
 
-func (w *anthropicResponseWriter) flush() {
-	if len(w.buf) == 0 {
+func (w *anthropicResponseWriter) sse(et string, data map[string]any) {
+	data["type"] = et
+	line := "event: " + et + "\ndata: " + string(mustMarshal(data)) + "\n\n"
+	w.ResponseWriter.Write([]byte(line))
+}
+
+func (w *anthropicResponseWriter) ensureStart(model string) {
+	if !w.msgSent {
+		w.msgSent = true
+		w.sse("message_start", map[string]any{
+			"message": map[string]any{
+				"id": fmt.Sprintf("msg_%x", w.reqID), "type": "message", "role": "assistant",
+				"content": []any{}, "model": model, "stop_reason": nil,
+				"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
+			},
+		})
+	}
+}
+
+func (w *anthropicResponseWriter) Write(b []byte) (int, error) {
+	// 每个 Write 调用可能包含多个 SSE 事件，按 "data: " 拆分
+	lines := strings.SplitAfter(string(b), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := line[6:]
+		if payload == "[DONE]" {
+			continue
+		}
+		var chunk map[string]any
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		w.convertChunk(chunk)
+	}
+	return len(b), nil
+}
+
+func (w *anthropicResponseWriter) convertChunk(chunk map[string]any) {
+	choices, ok := chunk["choices"].([]any)
+	if !ok || len(choices) == 0 {
 		return
 	}
-	converted := convertOpenAIToAnthropic(w.buf)
-	w.ResponseWriter.Header().Set("Content-Type", "application/json")
-	w.ResponseWriter.Write(converted)
+	choice, ok := choices[0].(map[string]any)
+	if !ok {
+		return
+	}
+	delta, _ := choice["delta"].(map[string]any)
+	finish, _ := choice["finish_reason"].(string)
+	model, _ := chunk["model"].(string)
+	if model == "" {
+		model = "mimo-v2.5-pro"
+	}
+
+	w.ensureStart(model)
+
+	if delta != nil {
+		// reasoning → thinking block
+		if reasoning, ok := delta["reasoning_content"].(string); ok && reasoning != "" {
+			if !w.thSeen {
+				w.thSeen = true
+				w.thIdx = 0
+				w.sse("content_block_start", map[string]any{
+					"index": w.thIdx,
+					"content_block": map[string]any{"type": "thinking", "thinking": ""},
+				})
+			}
+			w.sse("content_block_delta", map[string]any{
+				"index": w.thIdx,
+				"delta":    map[string]any{"type": "thinking_delta", "thinking": reasoning},
+			})
+		}
+		// text content
+		if text, ok := delta["content"].(string); ok && text != "" {
+			if w.thSeen && !w.coSeen {
+				w.sse("content_block_stop", map[string]any{"index": w.thIdx})
+			}
+			if !w.coSeen {
+				w.coSeen = true
+				w.coIdx = 1
+				if !w.thSeen {
+					w.coIdx = 0
+				}
+				w.sse("content_block_start", map[string]any{
+					"index": w.coIdx,
+					"content_block": map[string]any{"type": "text", "text": ""},
+				})
+			}
+			w.outBuf = append(w.outBuf, []byte(text)...)
+			w.sse("content_block_delta", map[string]any{
+				"index": w.coIdx,
+				"delta":  map[string]any{"type": "text_delta", "text": text},
+			})
+		}
+		// tool_use
+		if tcDelta, ok := delta["tool_calls"].([]any); ok && len(tcDelta) > 0 {
+			for _, tc := range tcDelta {
+				tcMap, ok := tc.(map[string]any)
+				if !ok { continue }
+				idx := int(tcMap["index"].(float64))
+				fn, _ := tcMap["function"].(map[string]any)
+				if fn == nil { continue }
+				if args, ok := fn["arguments"].(string); ok && args != "" {
+					var inp any
+					if err := json.Unmarshal([]byte(args), &inp); err != nil {
+						inp = map[string]any{"raw": args}
+					}
+					w.sse("content_block_delta", map[string]any{
+						"index": 2 + idx,
+						"delta": map[string]any{"type": "input_json_delta", "partial_json": string(mustMarshal(inp))},
+					})
+				}
+				if name, ok := fn["name"].(string); ok && name != "" {
+					w.sse("content_block_start", map[string]any{
+						"index": 2 + idx,
+						"content_block": map[string]any{"type": "tool_use", "id": tcMap["id"], "name": name, "input": map[string]any{}},
+					})
+				}
+			}
+		}
+	}
+
+	if finish != "" {
+		// 关闭打开的 block
+		if w.thSeen && !w.coSeen {
+			w.sse("content_block_stop", map[string]any{"index": w.thIdx})
+		}
+		if w.coSeen {
+			w.sse("content_block_stop", map[string]any{"index": w.coIdx})
+		}
+		sr := map[string]string{
+			"tool_calls": "tool_use", "stop": "end_turn", "length": "max_tokens",
+		}[finish]
+		if sr == "" { sr = finish }
+		w.sse("message_delta", map[string]any{
+			"delta": map[string]any{"stop_reason": sr, "stop_sequence": nil},
+			"usage": map[string]any{"output_tokens": len(w.outBuf)},
+		})
+		w.sse("message_stop", map[string]any{})
+	}
 }
 
-// convertAnthropicToOpenAI 将 Anthropic Messages 格式转为 OpenAI Chat Completions 格式
+func mustMarshal(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+// HandleModels 模型列表
 func convertAnthropicToOpenAI(body []byte) []byte {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
