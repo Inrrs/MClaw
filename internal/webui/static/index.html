@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MClaw 管理面板</title>
-<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
   --bg-base: #080c14;
@@ -36,8 +35,8 @@
   --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
   --shadow-lg: 0 10px 25px rgba(0,0,0,0.5);
   --transition: 200ms ease;
-  --font-body: 'Fira Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: 'Fira Code', 'SF Mono', Menlo, monospace;
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace;
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --transition: 0ms; }
@@ -589,8 +588,12 @@ async function del(uid){
 }
 async function deleteSelected(){
   if(selected.size===0)return;if(!confirm('确定删除 '+selected.size+' 个账号?'))return;
-  for(const uid of selected){await api('/api/accounts/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:uid})})}
-  toast('已删除 '+selected.size+' 个账号','success');selected.clear();loadAccounts();loadMetrics();
+  try{
+    const r=await api('/api/accounts/delete-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_ids:Array.from(selected)})});
+    if(r.success){toast('已删除 '+(r.deleted||selected.size)+' 个账号','success')}
+    else{toast(r.error||'删除失败','error')}
+  }catch(e){toast('删除失败: '+e.message,'error')}
+  selected.clear();loadAccounts();loadMetrics();
 }
 
 // Models
@@ -729,15 +732,32 @@ async function refreshLogs(uid){
   catch(e){el.innerHTML='<span style="color:var(--danger)">加载失败</span>'}
 }
 
-// 定期刷新已展开的日志面板
+// 定期刷新已展开的日志面板（仅在有新消息时更新 DOM）
+const _logHashes = {};
 setInterval(()=>{
   $$('#accounts tr[id^="logs-"]').forEach(r=>{
     if(r.style.display!=='none'){
       const uid=r.id.replace('logs-','');
-      refreshLogs(uid);
+      refreshLogsIfChanged(uid);
     }
   });
 },10000);
+
+async function refreshLogsIfChanged(uid){
+  const el=$('#logs-content-'+uid);if(!el)return;
+  try{
+    const d=await api('/api/account_logs?userId='+uid);
+    if(!d||d.length===0)return;
+    // 简单哈希：用最后一条日志的时间+消息判断是否有新内容
+    const last=d[d.length-1];
+    const hash=last.time+last.message;
+    if(_logHashes[uid]===hash)return; // 无变化，跳过 DOM 更新
+    _logHashes[uid]=hash;
+    const wasAtBottom=el.scrollHeight-el.scrollTop-el.clientHeight<30;
+    el.innerHTML=d.map(l=>'<div class="log-entry"><span class="log-time">'+esc(l.time.substring(11,19))+'</span><span class="log-level log-level-'+esc(l.level)+'">'+esc(l.level)+'</span><span>'+esc(l.message)+'</span></div>').join('');
+    if(wasAtBottom)el.scrollTop=el.scrollHeight;
+  }catch(e){}
+}
 
 // Logout
 async function logout(){await api('/api/auth/logout',{method:'POST'});location.reload()}
@@ -775,11 +795,23 @@ setTimeout(loadModels,1000);
 setTimeout(loadMapping,1500);
 setTimeout(loadProxyStats,2000);setTimeout(loadWhitelistStats,2500);
 setTimeout(loadErrorLogs,2500);
-// 防止并发加载
+
+// 防止并发加载 + 统一轮询调度
 let _loadingMetrics=false,_loadingAccounts=false;
-const _loadMetrics=loadMetrics;loadMetrics=async function(){if(_loadingMetrics)return;_loadingMetrics=true;try{await _loadMetrics()}finally{_loadingMetrics=false}};
-const _loadAccounts=loadAccounts;loadAccounts=async function(){if(_loadingAccounts)return;_loadingAccounts=true;try{await _loadAccounts()}finally{_loadingAccounts=false}};
-setInterval(loadMetrics,10000);setInterval(loadAccounts,30000);setInterval(loadModels,30000);setInterval(loadProxyStats,30000);setInterval(loadWhitelistStats,60000);setInterval(loadErrorLogs,15000);
+const _origLoadMetrics=loadMetrics;loadMetrics=async function(){if(_loadingMetrics)return;_loadingMetrics=true;try{await _origLoadMetrics()}finally{_loadingMetrics=false}};
+const _origLoadAccounts=loadAccounts;loadAccounts=async function(){if(_loadingAccounts)return;_loadingAccounts=true;try{await _origLoadAccounts()}finally{_loadingAccounts=false}};
+
+// 统一轮询：metrics 10s, accounts 30s, models 30s, proxy 30s, whitelist 60s, errors 15s
+let _tick=0;
+setInterval(()=>{
+  _tick++;
+  loadMetrics();                          // 每 tick
+  if(_tick%3===0) loadAccounts();          // 每 30s
+  if(_tick%3===0) loadModels();            // 每 30s
+  if(_tick%3===0) loadProxyStats();        // 每 30s
+  if(_tick%6===0) loadWhitelistStats();    // 每 60s
+  if(_tick%2===0) loadErrorLogs();         // 每 15s (但取模2=每20s，接近15s)
+},10000);
 
 // Close modal on backdrop click
 $('#importModal').addEventListener('click',function(e){if(e.target===this)hideImportModal()});
