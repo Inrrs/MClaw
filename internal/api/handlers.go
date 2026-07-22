@@ -524,6 +524,8 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 			slog.Debug("检测到 Anthropic 格式内容，自动转换")
 			body = convertAnthropicToOpenAI(body)
 		}
+		// 客户端自定义 system 会被 MIMO 拒绝（400），合并进首条 user 消息
+		body = mergeSystemIntoUser(body)
 		handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, w, body)
 	}
 }
@@ -550,7 +552,8 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 			return
 		}
 		// 1) Anthropic → OpenAI 请求转换（含模型映射 / 规范化）
-		oaiBody := prepareRequest(convertAnthropicToOpenAI(body), true)
+		//    再把客户端 system 合并进首条 user（MIMO 仅接受 bridge 注入的固定 system 前缀）
+		oaiBody := prepareRequest(mergeSystemIntoUser(convertAnthropicToOpenAI(body)), true)
 
 		// 2) 根据是否流式选择 Anthropic 响应转换方式
 		if isStreamRequest(oaiBody) {
@@ -972,6 +975,83 @@ func convertOpenAIToAnthropic(body []byte) []byte {
 	}
 	out, err := json.Marshal(result)
 	if err != nil { return body }
+	return out
+}
+
+// mergeSystemIntoUser 把所有 role:system 消息的文本合并进第一条 user 消息。
+// MIMO/OpenClaw 仅接受固定的 system 前缀（由 bridge 注入 "You are a personal assistant running inside OpenClaw."），
+// 客户端自定义 system 会被拒（400 Param Incorrect）。因此把客户端 system 文本前置到第一条 user 消息，
+// 让 bridge 注入合法前缀，同时保留客户端指令。
+func mergeSystemIntoUser(body []byte) []byte {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	msgs, ok := req["messages"].([]any)
+	if !ok {
+		return body
+	}
+	var sysParts []string
+	var kept []any
+	changed := false
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			kept = append(kept, m)
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if role != "system" {
+			kept = append(kept, m)
+			continue
+		}
+		changed = true
+		switch c := msg["content"].(type) {
+		case string:
+			if c != "" {
+				sysParts = append(sysParts, c)
+			}
+		case []any:
+			for _, b := range c {
+				if bm, ok := b.(map[string]any); ok {
+					if t, ok := bm["text"].(string); ok && t != "" {
+						sysParts = append(sysParts, t)
+					}
+				}
+			}
+		}
+	}
+	if !changed || len(sysParts) == 0 {
+		return body
+	}
+	sysText := strings.Join(sysParts, "\n\n")
+	merged := false
+	for _, m := range kept {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role == "user" {
+			switch c := msg["content"].(type) {
+			case string:
+				msg["content"] = sysText + "\n\n" + c
+			case []any:
+				msg["content"] = append([]any{map[string]any{"type": "text", "text": sysText}}, c...)
+			default:
+				msg["content"] = sysText
+			}
+			merged = true
+			break
+		}
+	}
+	if !merged {
+		kept = append([]any{map[string]any{"role": "user", "content": sysText}}, kept...)
+	}
+	req["messages"] = kept
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
 	return out
 }
 
