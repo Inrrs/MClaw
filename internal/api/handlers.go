@@ -525,6 +525,8 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 		}
 		// 客户端自定义 system 会被 MIMO 拒绝（400），合并进首条 user 消息
 		body = mergeSystemIntoUser(body)
+		// 按内容自适应思考强度（仅非 pro 的 MIMO 模型）
+		body = applyThinkingPolicy(body)
 		handleProxyRequest(r.Context(), pool, "/v1/chat/completions", true, w, body)
 	}
 }
@@ -554,8 +556,10 @@ func HandleMessages(pool *gateway.NodePool) http.HandlerFunc {
 		oaiBody := convertAnthropicToOpenAI(body)
 		// 2) 模型映射 + 规范化（先映射，便于按映射后的模型决定 system 处理）
 		oaiBody = prepareRequest(oaiBody, true)
-		// 3) 仅 mimo-v2.5-pro 合并 system 到 user（MIMO pro 仅接受 bridge 注入的固定前缀）
+		// 3) 合并 system 到 user（MIMO 所有模型都拒绝 role:system）
 		oaiBody = mergeSystemIntoUser(oaiBody)
+		// 4) 按内容自适应思考强度（仅非 pro 的 MIMO 模型）
+		oaiBody = applyThinkingPolicy(oaiBody)
 
 		// 2) 根据是否流式选择 Anthropic 响应转换方式
 		if isStreamRequest(oaiBody) {
@@ -1097,6 +1101,117 @@ func mergeSystemIntoUser(body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+// applyThinkingPolicy 根据请求内容为非 pro 的 MIMO 模型调整思考强度。
+// mimo-v2.5/v2-flash 默认全量 reasoning 很慢（简单问题 8s+），按内容降级：
+//   - 图片识别：thinking:{type:disabled}（识别无需深度思考，约 1.2s）
+//   - 复杂请求（代码/数学/长文本/tools/分析类关键词）：保留默认全量思考
+//   - 简单请求：reasoning_effort:low（约 4s）
+// pro 模型思考本身短且快，不调整。客户端已显式设置 thinking/reasoning_effort 时尊重之。
+func applyThinkingPolicy(body []byte) []byte {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	model, _ := req["model"].(string)
+	// 仅 MIMO 非 pro 模型调整
+	if !strings.HasPrefix(model, "mimo-v2") || strings.Contains(model, "mimo-v2.5-pro") {
+		return body
+	}
+	// 客户端已显式设置 → 尊重
+	if _, ok := req["thinking"]; ok {
+		return body
+	}
+	if _, ok := req["reasoning_effort"]; ok {
+		return body
+	}
+	switch {
+	case hasImageInMessages(req):
+		req["thinking"] = map[string]any{"type": "disabled"}
+	case isComplexRequest(req):
+		return body // 保留默认全量思考
+	default:
+		req["reasoning_effort"] = "low"
+	}
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// hasImageInMessages 检测 messages 是否含图片块
+func hasImageInMessages(req map[string]any) bool {
+	msgs, ok := req["messages"].([]any)
+	if !ok {
+		return false
+	}
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		arr, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, b := range arr {
+			if bm, ok := b.(map[string]any); ok {
+				t, _ := bm["type"].(string)
+				if t == "image_url" || t == "image" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isComplexRequest 启发式判断请求是否复杂（需要全量思考）
+func isComplexRequest(req map[string]any) bool {
+	// 有 tools → 复杂（工具调用需要推理）
+	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
+		return true
+	}
+	var sb strings.Builder
+	if msgs, ok := req["messages"].([]any); ok {
+		for _, m := range msgs {
+			msg, ok := m.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch c := msg["content"].(type) {
+			case string:
+				sb.WriteString(c)
+			case []any:
+				for _, b := range c {
+					if bm, ok := b.(map[string]any); ok {
+						if t, ok := bm["text"].(string); ok {
+							sb.WriteString(t)
+						}
+					}
+				}
+			}
+		}
+	}
+	s := sb.String()
+	if len(s) > 800 {
+		return true
+	}
+	if strings.Contains(s, "```") || strings.Contains(s, "def ") || strings.Contains(s, "function ") || strings.Contains(s, "class ") {
+		return true
+	}
+	lower := strings.ToLower(s)
+	kw := []string{"分析", "analyze", "推理", "reason", "step by step", "逐步", "解释", "explain",
+		"为什么", "why", "设计", "design", "实现", "implement", "比较", "compare",
+		"总结", "summarize", "计算", "calculate", "证明", "prove"}
+	for _, k := range kw {
+		if strings.Contains(lower, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // HandleModels 模型列表
