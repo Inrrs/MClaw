@@ -849,6 +849,7 @@ func convertAnthropicToOpenAI(body []byte) []byte {
 				} else if hasToolUse {
 					textParts := make([]string, 0)
 					toolCalls := make([]map[string]any, 0)
+					thinkingParts := make([]string, 0)
 					for _, b := range c {
 						if block, ok := b.(map[string]any); ok {
 							switch block["type"] {
@@ -861,10 +862,15 @@ func convertAnthropicToOpenAI(body []byte) []byte {
 									"type": "function",
 									"function": map[string]any{"name": block["name"], "arguments": string(inputJSON)},
 								})
+							case "thinking":
+								if t, ok := block["thinking"].(string); ok && t != "" {
+									thinkingParts = append(thinkingParts, t)
+								}
 							}
 						}
 					}
 					oaiMsg := map[string]any{"role": "assistant"}
+					if len(thinkingParts) > 0 { oaiMsg["reasoning_content"] = strings.Join(thinkingParts, "\n") }
 					if len(textParts) > 0 { oaiMsg["content"] = strings.Join(textParts, "\n") }
 					if len(toolCalls) > 0 { oaiMsg["tool_calls"] = toolCalls }
 					msgs = append(msgs, oaiMsg)
