@@ -339,8 +339,13 @@ func (m *Manager) GetProxyCount() int {
 
 // WhitelistInfo 白名单条目
 type WhitelistInfo struct {
-	IP   string `json:"ip"`
-	Meno string `json:"meno"`
+	IP   string `json:"IP"`
+	Meno string `json:"MEMO"`
+}
+
+// whitelistAPIResponse 白名单 API 返回格式
+type whitelistAPIResponse struct {
+	Data []WhitelistInfo `json:"data"`
 }
 
 // GetPublicIP 获取当前服务器公网 IP
@@ -405,7 +410,12 @@ func (m *Manager) GetWhitelist() ([]WhitelistInfo, error) {
 	if raw == "" {
 		return []WhitelistInfo{}, nil
 	}
-	// 尝试 JSON 解析
+	// 尝试 JSON 解析 {"data":[...]}
+	var apiResp whitelistAPIResponse
+	if err := json.Unmarshal(body, &apiResp); err == nil && apiResp.Data != nil {
+		return apiResp.Data, nil
+	}
+	// 兼容直接数组格式
 	var items []WhitelistInfo
 	if err := json.Unmarshal(body, &items); err == nil {
 		return items, nil
@@ -437,6 +447,11 @@ func (m *Manager) AddToWhitelist(ip, meno string) error {
 	body, _ := io.ReadAll(resp.Body)
 	raw := strings.TrimSpace(string(body))
 	if strings.Contains(raw, "error") || strings.Contains(raw, "Error") {
+		// Err:IpRep 表示 IP 已存在，视为成功
+		if strings.Contains(raw, "IpRep") {
+			slog.Info("IP 已在白名单中", "ip", ip, "response", raw)
+			return nil
+		}
 		return fmt.Errorf("添加白名单返回错误: %s", raw)
 	}
 	slog.Info("IP 白名单已添加", "ip", ip, "meno", meno, "response", raw)

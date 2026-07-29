@@ -12,16 +12,18 @@ def _load_mimo_config():
             with open(p) as f: cfg = json.load(f)
             x = cfg.get("models",{}).get("providers",{}).get("xiaomi",{})
             b, k = x.get("baseUrl",""), x.get("apiKey","")
+            ua = x.get("headers",{}).get("User-Agent","")
             k = os.path.expandvars(k) if k.startswith("${") else k
             if b.startswith("${"): b = os.path.expandvars(b)
             b = b.rstrip("/v1")
-            if k and b: return k, b
+            if k and b: return k, b, ua
         except Exception: continue
-    return "", ""
+    return "", "", ""
 
-_cfg_key, _cfg_base = _load_mimo_config()
+_cfg_key, _cfg_base, _cfg_ua = _load_mimo_config()
 KEY = os.environ.get("MIMO_API_KEY") or _cfg_key
 BASE = _cfg_base
+USER_AGENT = _cfg_ua or "mimo-claw"
 WS_URL = "__WS_URL__"
 SYSTEM_PREFIX = "You are a personal assistant running inside OpenClaw."
 
@@ -59,7 +61,7 @@ async def handle_request(ws, req, client, lock):
         # 仅在缺 system prompt 时注入，其余原样透传
         body_str = inject_system(body_str)
         url = f"{BASE}/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json", "User-Agent": USER_AGENT}
         async with client.stream("POST", url, headers=headers, content=body_str) as r:
             await safe_send(ws, lock, {"req_id": req_id, "type": "start", "status": r.status_code})
             async for chunk in r.aiter_bytes():
@@ -73,7 +75,7 @@ async def handle_request(ws, req, client, lock):
 async def sync_models(ws, client, lock):
     if not KEY: return
     try:
-        r = await client.get(f"{BASE}/v1/models", headers={"Authorization": f"Bearer {KEY}"}, timeout=15)
+        r = await client.get(f"{BASE}/v1/models", headers={"Authorization": f"Bearer {KEY}", "User-Agent": USER_AGENT}, timeout=15)
         if r.status_code == 200:
             ids = [m.get("id","") for m in r.json().get("data",[])]
             await safe_send(ws, lock, {"req_id":"__models__","type":"models","body":ids})
