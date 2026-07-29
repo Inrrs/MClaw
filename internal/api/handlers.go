@@ -120,12 +120,18 @@ func defaultModelMapping() map[string]string {
 	}
 }
 
-func containsImage(body []byte) bool {
+// containsMultimodal 检测请求体是否含多模态内容（图片/音频/视频）
+// 这些类型只被 mimo-v2.5 支持，pro 模型不支持
+func containsMultimodal(body []byte) bool {
 	s := string(body)
 	return strings.Contains(s, `"type":"image_url"`) ||
 		strings.Contains(s, `"type": "image_url"`) ||
 		strings.Contains(s, `"type":"image"`) ||
-		strings.Contains(s, `"type": "image"`)
+		strings.Contains(s, `"type": "image"`) ||
+		strings.Contains(s, `"type":"input_audio"`) ||
+		strings.Contains(s, `"type": "input_audio"`) ||
+		strings.Contains(s, `"type":"video_url"`) ||
+		strings.Contains(s, `"type": "video_url"`)
 }
 
 // stripImages 从 messages 的 content 数组中剥离 image_url/image 块，保留文字
@@ -456,11 +462,11 @@ func prepareRequest(body []byte, applyMapping bool) []byte {
 				slog.Debug("模型映射", "from", model, "to", mapped)
 			}
 		}
-		if containsImage(body) {
+		if containsMultimodal(body) {
 			curModel := getRequestModel(body)
 			if curModel != "" && curModel != "mimo-v2.5" && curModel != "mimo-v2-flash" {
 				body = replaceModel(body, "mimo-v2.5")
-				slog.Info("图片请求自动降级", "from", curModel, "to", "mimo-v2.5")
+				slog.Info("多模态请求自动降级", "from", curModel, "to", "mimo-v2.5")
 			}
 		}
 	}
@@ -509,14 +515,13 @@ func HandleChatCompletions(pool *gateway.NodePool) http.HandlerFunc {
 				body = replaceModel(body, mapped)
 			}
 		}
-		// 图片请求自动降级：mimo-v2.5-pro 无视觉能力，切到 mimo-v2.5（多模态）并保留图片
-		if containsImage(body) {
+		// 多模态请求自动降级：mimo-v2.5-pro 不支持图片/音频/视频，切到 mimo-v2.5
+		if containsMultimodal(body) {
 			curModel := getRequestModel(body)
 			if curModel != "" && curModel != "mimo-v2.5" && curModel != "mimo-v2-flash" {
 				body = replaceModel(body, "mimo-v2.5")
-				slog.Info("图片请求自动降级", "from", curModel, "to", "mimo-v2.5")
+				slog.Info("多模态请求自动降级", "from", curModel, "to", "mimo-v2.5")
 			}
-			// mimo-v2.5 / mimo-v2-flash 支持图片，保留 image 块（不再 stripImages）
 		}
 		// ccswitch 发 Anthropic 格式到 /v1 路径，检测并转换
 		if hasAnthropicContent(body) {
@@ -1133,7 +1138,7 @@ func applyThinkingPolicy(body []byte) []byte {
 		return body
 	}
 	switch {
-	case hasImageInMessages(req):
+	case hasMultimodalInMessages(req):
 		req["thinking"] = map[string]any{"type": "disabled"}
 	case isComplexRequest(req):
 		return body // 保留默认全量思考
@@ -1147,8 +1152,9 @@ func applyThinkingPolicy(body []byte) []byte {
 	return out
 }
 
-// hasImageInMessages 检测 messages 是否含图片块
-func hasImageInMessages(req map[string]any) bool {
+// hasMultimodalInMessages 检测 messages 是否含多模态内容（图片/音频/视频）
+// hasMultimodalInMessages 检测 messages 是否含多模态内容（图片/音频/视频）
+func hasMultimodalInMessages(req map[string]any) bool {
 	msgs, ok := req["messages"].([]any)
 	if !ok {
 		return false
@@ -1165,7 +1171,7 @@ func hasImageInMessages(req map[string]any) bool {
 		for _, b := range arr {
 			if bm, ok := b.(map[string]any); ok {
 				t, _ := bm["type"].(string)
-				if t == "image_url" || t == "image" {
+				if t == "image_url" || t == "image" || t == "input_audio" || t == "video_url" {
 					return true
 				}
 			}
