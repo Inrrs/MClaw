@@ -159,6 +159,12 @@ func handleBridgeMessage(pool *NodePool, node *Node, data []byte) {
 		return
 	}
 
+	// 忽略空 ReqID
+	if msg.ReqID == "" {
+		slog.Warn("收到空 ReqID 消息", "type", msg.Type, "node", node.ID)
+		return
+	}
+
 	// models 同步消息特殊处理
 	if msg.ReqID == "__models__" {
 		var models []string

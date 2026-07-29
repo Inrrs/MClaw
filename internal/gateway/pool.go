@@ -253,10 +253,7 @@ func (p *NodePool) countNodes() (total int, available int) {
 }
 
 func (p *NodePool) GetAvailable() *Node {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// 检查缓存是否需要刷新
+	// 检查缓存是否需要刷新（不持 p.mu）
 	p.availableMu.RLock()
 	dirty := p.availableDirty
 	p.availableMu.RUnlock()
@@ -278,14 +275,19 @@ func (p *NodePool) GetAvailable() *Node {
 
 	p.availableMu.RLock()
 	available := p.availableCache
+	count := len(available)
 	p.availableMu.RUnlock()
 
-	if len(available) == 0 {
+	if count == 0 {
 		return nil
 	}
 
-	node := available[p.idx%len(available)]
+	// 仅轮转索引需要锁 p.mu
+	p.mu.Lock()
+	node := available[p.idx%count]
 	p.idx++
+	p.mu.Unlock()
+
 	node.mu.Lock()
 	node.LastUsed = time.Now()
 	node.mu.Unlock()

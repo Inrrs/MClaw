@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -36,8 +37,8 @@ type Stats struct {
 // Manager 代理管理器
 type Manager struct {
 	pool      Pool
-	saveFunc  func(url string)            // 持久化池 URL 回调
-	saveFunc2 func(Pool)                  // 持久化完整配置回调（白名单等）
+	saveFunc  func(rawURL string)          // 持久化池 URL 回调
+	saveFunc2 func(Pool)                   // 持久化完整配置回调（白名单等）
 
 	mu        sync.RWMutex
 	proxies   []string
@@ -52,6 +53,10 @@ type Manager struct {
 	lastUsed  time.Time
 
 	stopCh chan struct{}
+
+	// 白名单缓存（避免重复检查）
+	wlCacheIP    string
+	wlCacheTime  time.Time
 }
 
 // NewManager 创建代理管理器
@@ -214,7 +219,7 @@ func (m *Manager) EnsureAvailable() string {
 	return ""
 }
 
-// testProxy 测试代理 IP 是否可用（GET http://httpbin.org/ip，10 秒超时）
+// testProxy 测试代理 IP 是否可用（HEAD https://api.ipify.org，10 秒超时）
 func (m *Manager) testProxy(proxy string) bool {
 	if proxy == "" {
 		return false
@@ -234,7 +239,7 @@ func (m *Manager) testProxy(proxy string) bool {
 		Transport: &http.Transport{Proxy: http.ProxyURL(u)},
 		Timeout:   10 * time.Second,
 	}
-	resp, err := client.Get("http://httpbin.org/ip")
+	resp, err := client.Head("https://api.ipify.org")
 	if err != nil {
 		return false
 	}
@@ -392,6 +397,11 @@ func (m *Manager) IsWhitelistConfigured() bool {
 	return uid != "" && key != ""
 }
 
+// isValidIP 校验字符串是否为合法 IPv4/IPv6
+func isValidIP(s string) bool {
+	return net.ParseIP(s) != nil
+}
+
 // GetWhitelist 获取当前白名单列表
 func (m *Manager) GetWhitelist() ([]WhitelistInfo, error) {
 	uid, key := m.whitelistParams()
@@ -399,8 +409,8 @@ func (m *Manager) GetWhitelist() ([]WhitelistInfo, error) {
 		return nil, fmt.Errorf("白名单未配置")
 	}
 	base := m.whitelistBaseURL()
-	url := fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=getjson", base, uid, key)
-	resp, err := http.Get(url)
+	rawURL := fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=getjson", base, uid, key)
+	resp, err := http.Get(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("获取白名单失败: %w", err)
 	}
@@ -420,11 +430,11 @@ func (m *Manager) GetWhitelist() ([]WhitelistInfo, error) {
 	if err := json.Unmarshal(body, &items); err == nil {
 		return items, nil
 	}
-	// fallback: 按行解析 text 格式
+	// fallback: 按行解析 text 格式（校验 IP 格式，避免误收垃圾数据）
 	var result []WhitelistInfo
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
-		if line != "" && !strings.Contains(line, "error") && !strings.Contains(line, "Error") {
+		if line != "" && !strings.Contains(line, "error") && !strings.Contains(line, "Error") && isValidIP(line) {
 			result = append(result, WhitelistInfo{IP: line})
 		}
 	}
@@ -438,8 +448,8 @@ func (m *Manager) AddToWhitelist(ip, meno string) error {
 		return fmt.Errorf("白名单未配置")
 	}
 	base := m.whitelistBaseURL()
-	url := fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=add&ip=%s&meno=%s", base, uid, key, url.QueryEscape(ip), url.QueryEscape(meno))
-	resp, err := http.Get(url)
+	rawURL := fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=add&ip=%s&meno=%s", base, uid, key, url.QueryEscape(ip), url.QueryEscape(meno))
+	resp, err := http.Get(rawURL)
 	if err != nil {
 		return fmt.Errorf("添加白名单失败: %w", err)
 	}
@@ -465,13 +475,13 @@ func (m *Manager) DeleteFromWhitelist(ip string) error {
 		return fmt.Errorf("白名单未配置")
 	}
 	base := m.whitelistBaseURL()
-	var reqURL string
+	var rawURL string
 	if ip == "all" {
-		reqURL = fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=del&ip=all", base, uid, key)
+		rawURL = fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=del&ip=all", base, uid, key)
 	} else {
-		reqURL = fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=del&ip=%s", base, uid, key, url.QueryEscape(ip))
+		rawURL = fmt.Sprintf("%s/IpWhiteList.aspx?uid=%s&ukey=%s&act=del&ip=%s", base, uid, key, url.QueryEscape(ip))
 	}
-	resp, err := http.Get(reqURL)
+	resp, err := http.Get(rawURL)
 	if err != nil {
 		return fmt.Errorf("删除白名单失败: %w", err)
 	}
@@ -481,7 +491,7 @@ func (m *Manager) DeleteFromWhitelist(ip string) error {
 	return nil
 }
 
-// EnsureWhitelist 确保当前公网 IP 在白名单中（不一致才更新）
+// EnsureWhitelist 确保当前公网 IP 在白名单中（不一致才更新，带本地缓存避免重复检查）
 func (m *Manager) EnsureWhitelist() error {
 	if !m.IsWhitelistConfigured() {
 		return nil // 未配置白名单，跳过
@@ -490,6 +500,15 @@ func (m *Manager) EnsureWhitelist() error {
 	publicIP, err := GetPublicIP()
 	if err != nil {
 		return fmt.Errorf("获取公网 IP 失败: %w", err)
+	}
+
+	// 本地缓存：5 分钟内 IP 未变则跳过
+	m.mu.RLock()
+	cachedIP := m.wlCacheIP
+	cachedTime := m.wlCacheTime
+	m.mu.RUnlock()
+	if cachedIP == publicIP && time.Since(cachedTime) < 5*time.Minute {
+		return nil
 	}
 
 	whitelist, err := m.GetWhitelist()
@@ -502,6 +521,10 @@ func (m *Manager) EnsureWhitelist() error {
 	for _, item := range whitelist {
 		if item.IP == publicIP {
 			slog.Debug("公网 IP 已在白名单中", "ip", publicIP)
+			m.mu.Lock()
+			m.wlCacheIP = publicIP
+			m.wlCacheTime = time.Now()
+			m.mu.Unlock()
 			return nil
 		}
 	}
@@ -510,13 +533,24 @@ func (m *Manager) EnsureWhitelist() error {
 	if len(whitelist) > 0 {
 		slog.Info("白名单 IP 不一致，更新中", "public_ip", publicIP, "old_whitelist", len(whitelist))
 		for _, item := range whitelist {
-			m.DeleteFromWhitelist(item.IP)
+			if err := m.DeleteFromWhitelist(item.IP); err != nil {
+				slog.Warn("删除旧白名单失败（中断更新）", "ip", item.IP, "error", err)
+				return err
+			}
 		}
 	} else {
 		slog.Info("白名单为空，添加当前 IP", "ip", publicIP)
 	}
 
-	return m.AddToWhitelist(publicIP, "mclaw-auto")
+	if err := m.AddToWhitelist(publicIP, "mclaw-auto"); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	m.wlCacheIP = publicIP
+	m.wlCacheTime = time.Now()
+	m.mu.Unlock()
+	return nil
 }
 
 // UpdateWhitelistConfig 更新白名单配置（WebUI 调用，自动持久化）

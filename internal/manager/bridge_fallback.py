@@ -4,7 +4,7 @@ MClaw Bridge (极简透传版)
 对齐 mimi3 的纯透传思路，所有格式转换由网关处理。
 bridge 只负责：连网关 → 收请求 → 透传给 MIMO → 回传结果。
 """
-import asyncio, websockets, httpx, json, os
+import asyncio, websockets, httpx, json, os, time
 
 def _load_mimo_config():
     for p in [os.path.expanduser("~/.openclaw/openclaw.json"), "/root/.openclaw/openclaw.json", "/opt/mimo-claw-seed/bundle/openclaw/openclaw.json"]:
@@ -37,6 +37,12 @@ async def safe_send(ws, lock, data):
 
 def inject_system(body_str):
     """OpenAI 请求：注入 system prompt（仅 mimo-v2.5-pro）"""
+    # 快速跳过：已有 system 关键字且非 pro 模型的不做 parse
+    if '"system"' in body_str:
+        if 'mimo-v2.5-pro' not in body_str:
+            return body_str
+        # pro 模型但已有 system，也跳过
+        return body_str
     try: d = json.loads(body_str)
     except Exception: return body_str
     model = d.get("model", "")
@@ -80,7 +86,14 @@ async def sync_models(ws, client, lock):
             ids = [m.get("id","") for m in r.json().get("data",[])]
             await safe_send(ws, lock, {"req_id":"__models__","type":"models","body":ids})
             log(f"models: {len(ids)}")
-    except Exception: pass
+    except Exception as e: log(f"sync_models err: {e}")
+
+async def periodic_model_sync(ws, client, lock, interval=300):
+    """每 interval 秒刷新一次模型列表"""
+    while True:
+        await asyncio.sleep(interval)
+        try: await sync_models(ws, client, lock)
+        except Exception: pass
 
 async def main():
     _placeholder = "__" + "WS_URL" + "__"
@@ -88,7 +101,7 @@ async def main():
         log("ERROR: no WS_URL")
         return
     log(f"bridge start WS={WS_URL} API={BASE}")
-    async with httpx.AsyncClient(timeout=None) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10)) as client:
         retry = 0
         while True:
             try:
@@ -98,6 +111,7 @@ async def main():
                     retry = 0; log("WS connected")
                     lock = asyncio.Lock()
                     await sync_models(ws, client, lock)
+                    asyncio.create_task(periodic_model_sync(ws, client, lock))
                     while True:
                         try:
                             raw = await ws.recv(decode=False)
